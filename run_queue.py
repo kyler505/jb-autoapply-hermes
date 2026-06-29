@@ -28,17 +28,17 @@ async def apply_workday(page, job, acct):
     
     async def wd_click(text):
         """Click Workday button using Playwright's native .click()."""
-        aid_map = {"Create Account": "createAccountSubmitButton", "Sign In": "createAccountSubmitButton"}
-        aid = aid_map.get(text)
-        if aid:
-            btn = page.locator(f'[data-automation-id="{aid}"]')
-            if await btn.is_visible(timeout=2000):
-                await btn.click(); return True
         try:
             btn = page.get_by_role("button", name=text)
             if await btn.count() > 0:
                 await btn.first.click(); return True
         except: pass
+        aid_map = {"Create Account": "createAccountSubmitButton"}
+        aid = aid_map.get(text)
+        if aid:
+            btn = page.locator(f'[data-automation-id="{aid}"]')
+            if await btn.is_visible(timeout=2000):
+                await btn.click(); return True
         try:
             btn = page.locator(f'button:has-text("{text}")')
             if await btn.is_visible(timeout=2000):
@@ -52,38 +52,46 @@ async def apply_workday(page, job, acct):
     await page.wait_for_timeout(3000)
     body = await page.inner_text("body")
     
-    if "Sign In" in body and "Email" in body and "Password" in body and "Create Account" not in body.split("Sign In")[0]:
-        print("  → Signing in (stored credentials)...")
-        await page.locator('#input-4').fill(acct["email"])
-        await page.locator('#input-5').fill(acct["password"])
-        await page.wait_for_timeout(500)
-        if await wd_click("Sign In"):
-            await page.wait_for_timeout(5000)
-            body = await page.inner_text("body")
-            if "My Information" in body or "my information" in body.lower():
-                print("  ✅ SIGNED IN!")
-            elif "wrong" in body.lower():
-                print("  ⚠ Wrong password")
-                return "WRONG_PASSWORD"
-        else:
-            return "CLICK_FAILED"
-    elif "Create Account" in body:
-        print("  → Creating account...")
-        pwd = _accounts.generate_password()
-        await page.locator('#input-4').fill(acct["email"])
-        await page.locator('#input-5').fill(pwd)
-        await page.locator('#input-6').fill(pwd)
-        await page.locator('#input-9').check()
-        await page.wait_for_timeout(500)
-        if await wd_click("Create Account"):
-            await page.wait_for_timeout(5000)
-            body = await page.inner_text("body")
-            if "My Information" in body or "my information" in body.lower():
-                if domain: _accounts.save_account(domain, acct["email"], pwd)
-                print("  ✅ ACCOUNT CREATED!")
+    # Route: if we see Create Account form, first try clicking "Sign In" to use stored creds
+    if "Create Account" in body and "Email" in body:
+        if _accounts.has_account(url):
+            print("  → Account exists, clicking Sign In link...")
+            signin_link = page.locator('[data-automation-id="signInLink"]')
+            if await signin_link.is_visible(timeout=3000):
+                await signin_link.click()
+                await page.wait_for_timeout(3000)
+            
+            print("  → Signing in...")
+            await page.locator('#input-4').fill(acct["email"])
+            await page.locator('#input-5').fill(acct["password"])
+            await page.wait_for_timeout(500)
+            if await wd_click("Sign In"):
+                await page.wait_for_timeout(5000)
+                body = await page.inner_text("body")
+                if "My Information" in body or "my information" in body.lower():
+                    print("  ✅ SIGNED IN!")
+                elif "wrong" in body.lower():
+                    print("  ⚠ Wrong password")
+                    return "WRONG_PASSWORD"
             else:
-                print(f"  After create: {body[:200]}")
-                return "CREATE_FAILED"
+                return "CLICK_FAILED"
+        else:
+            print("  → Creating account...")
+            pwd = _accounts.generate_password()
+            await page.locator('#input-4').fill(acct["email"])
+            await page.locator('#input-5').fill(pwd)
+            await page.locator('#input-6').fill(pwd)
+            await page.locator('#input-9').check()
+            await page.wait_for_timeout(500)
+            if await wd_click("Create Account"):
+                await page.wait_for_timeout(5000)
+                body = await page.inner_text("body")
+                if "My Information" in body or "my information" in body.lower():
+                    if domain: _accounts.save_account(domain, acct["email"], pwd)
+                    print("  ✅ ACCOUNT CREATED!")
+                else:
+                    print(f"  After create: {body[:200]}")
+                    return "CREATE_FAILED"
     
     # Wait for Simplify autofill
     print("  → Waiting for Simplify...")
