@@ -137,8 +137,8 @@ async def apply_job(page, job, acct):
     f = await fill_missing(page)
     if f: print(f"  Filled {f} more")
 
-    # Wizard
-    for step in range(50):
+    # Wizard - up to 200 steps for long forms (UK apprentice roles have 50+)
+    for step in range(200):
         f = await fill_missing(page)
         if f and step < 5: print(f"  Filled {f}")
 
