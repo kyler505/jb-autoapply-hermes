@@ -53,6 +53,13 @@ def passes_filters(fm: dict[str, Any], t: dict[str, Any]) -> bool:
         job_locs = {x.lower() for x in _as_list(fm.get('locations'))}
         if not any(any(il in jl for jl in job_locs) for il in inc_locs):
             return False
+    # Exclude UK-based jobs
+    uk_indicators = ['uk', 'united kingdom', 'bristol', 'nailsea', '/gb-', '/gb/']
+    job_locs_str = ' '.join(str(x).lower() for x in _as_list(fm.get('locations')))
+    url_str = str(fm.get('url', '')).lower()
+    for indicator in uk_indicators:
+        if indicator in job_locs_str or indicator in url_str:
+            return False
     return True
 
 
