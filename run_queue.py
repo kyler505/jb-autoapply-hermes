@@ -137,8 +137,9 @@ async def apply_job(page, job, acct):
     f = await fill_missing(page)
     if f: print(f"  Filled {f} more")
 
-    # Wizard - up to 200 steps for long forms (UK apprentice roles have 50+)
-    for step in range(200):
+    # Wizard - up to 500 steps for long forms
+    last_state = ""
+    for step in range(500):
         f = await fill_missing(page)
         if f and step < 5: print(f"  Filled {f}")
 
@@ -154,7 +155,13 @@ async def apply_job(page, job, acct):
         for name in ["Save and Continue", "Continue", "Next", "Save & Continue", "Save"]:
             if await has_wd(page, name) and await click_wd(page, name):
                 await page.wait_for_timeout(3000)
-                if step < 5 or step % 10 == 9: print(f"  → {name}")
+                # Check if page actually changed - if not, we're stuck
+                new_body = await page.inner_text("body")
+                if new_body == last_state:
+                    print(f"  → Stuck at step {step+1}")
+                    break
+                last_state = new_body
+                if step < 5 or step % 20 == 19: print(f"  → {name} (step {step+1})")
                 break
         else:
             break
