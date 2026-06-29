@@ -64,10 +64,20 @@ async def apply_workday(page, job, acct):
     apply_url = url.rstrip("/") + "/apply/applyManually"
     await page.goto(apply_url, timeout=30000)
     await page.wait_for_timeout(3000)
-
-    body = await page.inner_text("body")
-
-    if "Create Account" in body and "Email" in body:
+    # Check if we're on the form or still need to sign in
+    initial_body = await page.inner_text("body")
+    
+    # If the page has "Apply Manually" (job listing), we need to start the application
+    if "Apply Manually" in initial_body and "First Name" not in initial_body:
+        am = page.locator('[data-automation-id="applyManually"]')
+        if await am.is_visible(timeout=2000):
+            print("  → Clicking Apply Manually...")
+            await am.click()
+            await page.wait_for_timeout(5000)
+            initial_body = await page.inner_text("body")
+    
+    # If we see the Create Account form with sign-in options
+    if "Create Account" in initial_body and "Email" in initial_body:
         if _accounts.has_account(url):
             print("  → Trying stored credentials...")
             await page.locator('[data-automation-id="signInLink"]').click()
@@ -75,29 +85,59 @@ async def apply_workday(page, job, acct):
             await page.locator('[data-automation-id="email"]').fill(acct["email"])
             await page.locator('[data-automation-id="password"]').fill(acct["password"])
             await page.wait_for_timeout(500)
-            if await wd_click(page, "Sign In"):
+            await wd_click(page, "Sign In")
+            await page.wait_for_timeout(5000)
+            
+            # After sign-in, navigate back to the job page and click Apply Manually
+            # (navigating directly to /apply/applyManually doesn't work when signed in)
+            job_url = url.rstrip("/")
+            await page.goto(job_url, timeout=30000)
+            await page.wait_for_timeout(3000)
+            
+            # Click Apply button
+            apply_btn = page.locator('[data-automation-id="adventureButton"]')
+            if await apply_btn.is_visible(timeout=3000):
+                await apply_btn.click()
+                await page.wait_for_timeout(3000)
+            
+            # Click Apply Manually
+            am = page.locator('[data-automation-id="applyManually"]')
+            if await am.is_visible(timeout=3000):
+                await am.click()
                 await page.wait_for_timeout(5000)
-                body2 = await page.inner_text("body")
-                if "My Information" in body2 or "Hello" in body2:
-                    print("  ✅ SIGNED IN!")
-                elif "wrong" in body2.lower() or "locked" in body2.lower():
-                    print("  ⚠ Wrong password - creating fresh account...")
-                    await page.locator('[data-automation-id="signInLink"]').click()
-                    await page.wait_for_timeout(2000)
-                    return await create_account(page, acct, domain, url)
-                else:
-                    print(f"  Unexpected state after sign-in: {body2[:200]}")
+            
+            body2 = await page.inner_text("body")
+            
+            if "First Name" in body2 or "Save and Continue" in body2:
+                print("  ✅ SIGNED IN AND ON FORM!")
+            elif "Start Your Application" in body2 or "Apply Manually" in body2:
+                # Click Apply Manually
+                am = page.locator('[data-automation-id="applyManually"]')
+                if await am.is_visible(timeout=2000):
+                    await am.click()
+                    await page.wait_for_timeout(5000)
+                    body3 = await page.inner_text("body")
+                    if "First Name" in body3:
+                        print("  ✅ FORM AFTER APPLY MANUALLY!")
+            elif "Sign In" in body2:
+                if "wrong" in body2.lower() or "locked" in body2.lower():
+                    print("  ⚠ Wrong password")
+                    return "WRONG_PASSWORD"
+                print(f"  Still on sign-in: {body2[:200]}")
             else:
-                print("  ⚠ Could not click Sign In")
-                return "CLICK_FAILED"
+                print(f"  After sign-in state: {body2[:200]}")
         else:
             return await create_account(page, acct, domain, url)
-    elif "My Information" in body or "Hello" in body:
-        print("  ✅ Already signed in!")
-    else:
-        print(f"  Unexpected page: {body[:200]}")
-        return "UNKNOWN"
-
+    
+    elif "My Information" in initial_body or "Hello" in initial_body or "First Name" in initial_body:
+        print("  ✅ Already signed in or on form!")
+    elif "Start Your Application" in initial_body or "Apply Manually" in initial_body:
+        print("  → Clicking Apply Manually...")
+        am = page.locator('[data-automation-id="applyManually"]')
+        if await am.is_visible(timeout=2000):
+            await am.click()
+            await page.wait_for_timeout(5000)
+    
     return await advance_wizard(page)
 
 
