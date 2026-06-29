@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 
 from jb_autoapply import config
+from jb_autoapply.adapters import build_plan
+from jb_autoapply.checkpoints import create_checkpoint, list_checkpoints, resolve_checkpoint
 from jb_autoapply.prepare import prepare_job
 from jb_autoapply.qa_store import find_answer, record_answer
 from jb_autoapply.selector import build_queue
@@ -94,6 +96,7 @@ body
     config.QUEUE_MD = config.OUT_DIR / 'queue.md'
     config.PLAN_JSON = config.OUT_DIR / 'plan.json'
     config.RESUME_OUT_DIR = config.OUT_DIR / 'resumes'
+    config.CHECKPOINTS_DIR = config.OUT_DIR / 'checkpoints'
     return vault
 
 
@@ -112,8 +115,41 @@ def test_prepare_writes_application_packet(temp_vault):
     note = (temp_vault / 'Jobs' / 'A.md').read_text(encoding='utf-8')
     assert '## Application' in note
     assert 'Apply URL' in note
+    assert 'Legitimate browser behavior profile' in note
+    assert 'Human checkpoints' in note
     assert result['resume'] == 'resume'
     assert 'resume_used' in note
+
+
+def test_build_plan_contains_assisted_browser_and_checkpoint_policy(temp_vault):
+    q = build_queue(write_priority=False)
+    plan = build_plan(q[0]).as_dict()
+    assert plan['browser_profile']['mode'] == 'assisted'
+    assert plan['browser_profile']['per_step_rescan'] is True
+    assert 'nopecha_enabled' in plan['browser_profile']
+    assert 'nopecha_enabled' in plan
+    assert isinstance(plan['nopecha_enabled'], bool)
+
+
+def test_checkpoint_roundtrip_updates_job_note(temp_vault):
+    q = build_queue(write_priority=False)
+    checkpoint = create_checkpoint(
+        q[0],
+        reason='captcha',
+        details='Visible anti-bot challenge on apply form',
+        next_step='Wait for user to clear challenge and then resume on review step',
+        evidence=['/tmp/captcha.png'],
+        resume_pdf='/tmp/resume.pdf',
+    )
+    pending = list_checkpoints('pending')
+    assert len(pending) == 1
+    assert pending[0].checkpoint_id == checkpoint.checkpoint_id
+    note = (temp_vault / 'Jobs' / 'A.md').read_text(encoding='utf-8')
+    assert 'manual_required' in note
+    resolved = resolve_checkpoint(checkpoint.checkpoint_id, note='User cleared challenge')
+    assert resolved.status == 'completed'
+    note = (temp_vault / 'Jobs' / 'A.md').read_text(encoding='utf-8')
+    assert 'ready_to_resume' in note
 
 
 def test_qa_store_roundtrip(temp_vault):
@@ -122,3 +158,43 @@ def test_qa_store_roundtrip(temp_vault):
     hit = find_answer('What is your expected work authorization?')
     assert hit is not None
     assert 'No sponsorship' in hit.answer
+
+
+def test_build_plan_nopecha_disabled_drops_challenge_checkpoint(temp_vault, monkeypatch):
+    """When NopeCHA is not ready, the challenge checkpoint is present."""
+    monkeypatch.setattr('jb_autoapply.nopecha.is_ready', lambda: False)
+
+    q = build_queue(write_priority=False)
+    plan = build_plan(q[0]).as_dict()
+    assert plan['nopecha_enabled'] is False
+    kinds = [c['kind'] for c in plan['manual_checkpoints']]
+    assert 'challenge' in kinds
+    assert 'verification' in kinds
+    assert 'final-review' in kinds
+    assert 'challenge_signals' in plan['browser_profile']
+    assert len(plan['browser_profile']['challenge_signals']) > 0
+    assert 'captcha' in plan['browser_profile']['challenge_signals']
+
+
+def test_build_plan_nopecha_enabled_skips_challenge_checkpoint(temp_vault, monkeypatch):
+    """When NopeCHA is ready, the challenge checkpoint is omitted and nopecha_args are present."""
+    monkeypatch.setattr('jb_autoapply.nopecha.is_ready', lambda: True)
+    monkeypatch.setattr(
+        'jb_autoapply.nopecha.playwright_args',
+        lambda ext_path=None: ['--load-extension=/mock/nopecha', '--no-sandbox'],
+    )
+
+    q = build_queue(write_priority=False)
+    plan = build_plan(q[0]).as_dict()
+    assert plan['nopecha_enabled'] is True
+    kinds = [c['kind'] for c in plan['manual_checkpoints']]
+    assert 'challenge' not in kinds
+    assert 'verification' in kinds
+    assert 'final-review' in kinds
+    bp = plan['browser_profile']
+    assert bp['nopecha_enabled'] is True
+    assert 'nopecha_args' in bp
+    assert any('load-extension=' in a for a in bp['nopecha_args'])
+    # When NopeCHA is enabled, challenge_signals should be empty
+    assert len(bp.get('challenge_signals', [])) == 0
+

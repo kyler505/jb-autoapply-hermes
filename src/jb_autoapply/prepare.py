@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, profile_data
+from .adapters import build_plan
 from .build_resume import compile_resume, resume_name_for_category
 from .vault import read_note, set_fm_field, upsert_body_section, write_note
 
@@ -75,6 +76,7 @@ def prepare_job(job: dict[str, Any], compile_pdf: bool = True) -> dict[str, Any]
     company = str(fm.get('company') or job.get('company') or '')
     role = str(fm.get('role') or job.get('role') or '')
     category = str(fm.get('category') or job.get('category') or 'internship')
+    plan = build_plan(job)
     ctx = {
         'company': company,
         'role': role,
@@ -93,13 +95,36 @@ def prepare_job(job: dict[str, Any], compile_pdf: bool = True) -> dict[str, Any]
     qa_block, qa_todos = _qa_answers(ctx)
     todos = cover_todos + qa_todos
     todo_md = '\n'.join(f'- [ ] ⚠ Resolve placeholder in {t}' for t in dict.fromkeys(todos)) if todos else '- [x] No unresolved placeholders'
+    browser_profile_md = '\n'.join(
+        [
+            f"- **Mode:** {plan.browser_profile['mode']}",
+            f"- **Action pacing:** {plan.browser_profile['action_delay_ms']['min']}-{plan.browser_profile['action_delay_ms']['max']} ms between actions",
+            f"- **Settle after actions:** {plan.browser_profile['post_action_settle_ms']} ms",
+            f"- **Settle after uploads:** {plan.browser_profile['post_upload_settle_ms']} ms",
+            f"- **Re-scan each step:** {'Yes' if plan.browser_profile['per_step_rescan'] else 'No'}",
+        ]
+        + [f'- {item}' for item in plan.browser_profile['input_strategy']]
+    )
+    checkpoint_md = '\n'.join(
+        f"- **{item['kind']}:** {item['trigger']} → {item['action']}" for item in plan.manual_checkpoints
+    )
+    apply_steps_md = '\n'.join(f'- {step}' for step in plan.steps)
 
     content = f'''**Apply URL:** {fm.get('url', '—')}
 **Resume:** {resume_line}
-**State:** prepared — review & submit (pipeline does not submit on its own)
+**State:** prepared — assisted apply with human checkpoints
 
 ### Autofill data
 {_autofill_block(profile)}
+
+### Assisted apply steps
+{apply_steps_md}
+
+### Legitimate browser behavior profile
+{browser_profile_md}
+
+### Human checkpoints
+{checkpoint_md}
 
 ### Screening answers (from Q&A bank)
 {qa_block or '_No reusable answers available yet — add notes to Profile/QA/._'}
@@ -119,7 +144,7 @@ def prepare_job(job: dict[str, Any], compile_pdf: bool = True) -> dict[str, Any]
 '''
     body = upsert_body_section(body, f'Application {today}', content)
     fm_text = set_fm_field(fm_text, 'resume_used', resume_name)
-    fm_text = set_fm_field(fm_text, 'apply_method', 'manual')
+    fm_text = set_fm_field(fm_text, 'apply_method', f'assisted-{plan.site}')
     fm_text = set_fm_field(fm_text, 'needs_review', True)
     write_note(path, fm_text, body)
     return {'file': path.name, 'company': company, 'role': role, 'resume': resume_name, 'pdf': str(pdf_path) if pdf_path else None, 'unresolved': list(dict.fromkeys(todos))}

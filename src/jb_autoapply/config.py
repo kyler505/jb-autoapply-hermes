@@ -22,6 +22,7 @@ QUEUE_JSON = OUT_DIR / 'queue.json'
 QUEUE_MD = OUT_DIR / 'queue.md'
 PLAN_JSON = OUT_DIR / 'plan.json'
 RESUME_OUT_DIR = OUT_DIR / 'resumes'
+CHECKPOINTS_DIR = OUT_DIR / 'checkpoints'
 
 DISCIPLINE_WEIGHTS = {
     'swe': 30,

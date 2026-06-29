@@ -9,7 +9,10 @@ It improves the original Cowork workflow by making the pipeline explicit and det
 - write review packets into each job note
 - compile or select the right resume artifact
 - generate a site-aware apply plan with hard review boundaries
-- keep the manual submit step separate
+- harden assisted browser behavior around native controls, pacing, and per-step rescans
+- create human-in-the-loop checkpoints for OTP, account creation, and final approval
+- **optionally bypass CAPTCHAs automatically** via the [NopeCHA](https://nopecha.com/) extension
+- keep the final submit step separate unless a human explicitly approves it
 
 ## Quick start
 
@@ -44,7 +47,54 @@ export JB_VAULT=/path/to/jb
 - `queue` — filter/rank jobs and write `out/queue.json` + `out/queue.md`
 - `prepare` — write `## Application <date>` packets into queued notes
 - `plan` — emit site-aware apply plans for the queued jobs
+- `checkpoint-create` — create a manual-required checkpoint artifact for a blocked job
+- `checkpoint-list` — list pending/completed manual checkpoints under `out/checkpoints/`
+- `checkpoint-resolve` — mark a checkpoint complete/skipped so the job can resume
+- `nopecha-check` — check whether the NopeCHA extension and API key are ready
+- `nopecha-download` — download the NopeCHA Chrome extension (cached in `~/.nopecha/`)
+- `nopecha-setup <key>` — write your NopeCHA API key into the extension settings
 
-## What this repo does not do
+## NopeCHA CAPTCHA bypass
 
-It does not auto-submit applications. The review gate stays manual on purpose.
+When the NopeCHA extension is configured, `build_plan()` and `prepare` automatically
+detect it and switch the apply plan to **auto-solve mode**:
+
+- CAPTCHAs (reCAPTCHA v2/v3, hCaptcha, Turnstile, text, FunCAPTCHA) are solved
+  by the extension — no manual checkpoint is created for them.
+- The `browser_profile` in the apply plan includes `nopecha_args` (Playwright
+  launch flags) and drops CAPTCHA from `challenge_signals`.
+- OTP/account-creation verification and final-review checkpoints **remain**
+  — NopeCHA can't handle those.
+
+### Setup
+
+Ensure the extension is downloaded:
+
+```bash
+jb-autoapply nopecha-download
+jb-autoapply nopecha-check    # should say "ready: yes"
+```
+
+The pipeline auto-detects the extension. Run `jb-autoapply plan` — plans
+will show `nopecha_enabled: true` in their browser profile.
+
+### Optional: Premium API key
+
+For more than 100 solves/day, [sign up at nopecha.com](https://nopecha.com/manage)
+and then:
+
+```bash
+export NOPECHA_KEY=your_key_here
+jb-autoapply nopecha-setup "$NOPECHA_KEY"
+```
+
+### How it works
+
+The `jb_autoapply.nopecha` module:
+1. Downloads the official NopeCHA extension from GitHub releases.
+2. Writes your API key into the extension's `settings.json` (automation build).
+3. Provides `playwright_args()` that return the Chromium CLI flags to load the
+   extension at browser launch time.
+
+The Hermes agent executing the plan reads `browser_profile.nopecha_args` and
+passes those to `playwright.chromium.launch_persistent_context(...)`.
