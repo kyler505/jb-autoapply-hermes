@@ -7,6 +7,7 @@ NDIR = str(Path.home() / ".nopecha" / "chromium")
 PROFILE = "/tmp/autoapply-run"
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from jb_autoapply import accounts as _accounts
+from playwright.async_api import async_playwright
 from jb_autoapply.selector import build_queue
 
 # Profile data for filling fields Simplify misses
