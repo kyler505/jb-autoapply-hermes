@@ -88,44 +88,52 @@ async def apply_workday(page, job, acct):
             await wd_click(page, "Sign In")
             await page.wait_for_timeout(5000)
             
-            # After sign-in, navigate back to the job page and click Apply Manually
-            # (navigating directly to /apply/applyManually doesn't work when signed in)
+            # After sign-in, go to job page and click Apply -> Apply Manually
             job_url = url.rstrip("/")
             await page.goto(job_url, timeout=30000)
             await page.wait_for_timeout(3000)
             
-            # Click Apply button
+            # Check if Apply button is visible - means signed in
             apply_btn = page.locator('[data-automation-id="adventureButton"]')
             if await apply_btn.is_visible(timeout=3000):
+                print("  ✅ SIGNED IN (Apply button visible)!")
                 await apply_btn.click()
                 await page.wait_for_timeout(3000)
-            
-            # Click Apply Manually
-            am = page.locator('[data-automation-id="applyManually"]')
-            if await am.is_visible(timeout=3000):
-                await am.click()
-                await page.wait_for_timeout(5000)
-            
-            body2 = await page.inner_text("body")
-            
-            if "First Name" in body2 or "Save and Continue" in body2:
-                print("  ✅ SIGNED IN AND ON FORM!")
-            elif "Start Your Application" in body2 or "Apply Manually" in body2:
+                
                 # Click Apply Manually
                 am = page.locator('[data-automation-id="applyManually"]')
-                if await am.is_visible(timeout=2000):
+                if await am.is_visible(timeout=5000):
+                    print("  → Apply Manually...")
                     await am.click()
                     await page.wait_for_timeout(5000)
-                    body3 = await page.inner_text("body")
-                    if "First Name" in body3:
-                        print("  ✅ FORM AFTER APPLY MANUALLY!")
-            elif "Sign In" in body2:
-                if "wrong" in body2.lower() or "locked" in body2.lower():
-                    print("  ⚠ Wrong password")
-                    return "WRONG_PASSWORD"
-                print(f"  Still on sign-in: {body2[:200]}")
+                    
+                    # Check if we got to the form
+                    body2 = await page.inner_text("body")
+                    if "First Name" in body2 or "Save and Continue" in body2:
+                        print("  ✅ ON FORM!")
+                    else:
+                        # Try re-navigating to apply URL since we're signed in
+                        print(f"  Applying via URL...")
+                        await page.goto(apply_url, timeout=30000)
+                        await page.wait_for_timeout(5000)
+                        body2 = await page.inner_text("body")
+                        if "First Name" in body2 or "Save and Continue" in body2:
+                            print("  ✅ ON FORM!")
+                        else:
+                            print(f"  State: {body2[:100]}")
+                else:
+                    print("  Apply Manually not found")
             else:
-                print(f"  After sign-in state: {body2[:200]}")
+                print(f"  ⚠ Apply button not visible. Checking state...")
+                # Still may be signed in - try apply URL directly
+                await page.goto(apply_url, timeout=30000)
+                await page.wait_for_timeout(5000)
+                body2 = await page.inner_text("body")
+                if "First Name" in body2 or "Save and Continue" in body2:
+                    print("  ✅ ON FORM VIA DIRECT URL!")
+                else:
+                    print(f"  State: {body2[:150]}")
+                    return "SIGNIN_FAILED"
         else:
             return await create_account(page, acct, domain, url)
     
