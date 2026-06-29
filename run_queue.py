@@ -26,89 +26,76 @@ async def apply_workday(page, job, acct):
     print(f"  URL: {url}")
     print(f"  Account: {acct['email']} ({domain})")
     
+    async def wd_click(text):
+        """Click Workday button using Playwright's native .click()."""
+        aid_map = {"Create Account": "createAccountSubmitButton", "Sign In": "createAccountSubmitButton"}
+        aid = aid_map.get(text)
+        if aid:
+            btn = page.locator(f'[data-automation-id="{aid}"]')
+            if await btn.is_visible(timeout=2000):
+                await btn.click(); return True
+        try:
+            btn = page.get_by_role("button", name=text)
+            if await btn.count() > 0:
+                await btn.first.click(); return True
+        except: pass
+        try:
+            btn = page.locator(f'button:has-text("{text}")')
+            if await btn.is_visible(timeout=2000):
+                await btn.click(); return True
+        except: pass
+        return False
+    
     # Navigate to apply page
     apply_url = url.rstrip("/") + "/apply/applyManually"
     await page.goto(apply_url, timeout=30000)
     await page.wait_for_timeout(3000)
-    
     body = await page.inner_text("body")
     
-    if "Sign In" in body and "Email" in body:
-        print("  → Signing in with stored credentials...")
-        try:
-            await page.locator('input[data-automation-id="email"]').fill(acct["email"])
-            await page.locator('input[data-automation-id="password"]').fill(acct["password"])
-            await page.wait_for_timeout(500)
-            # Click Sign In
-            await page.evaluate("""
-                () => {
-                    const btns = document.querySelectorAll('button');
-                    for (const b of btns) {
-                        if (b.innerText.trim() === 'Sign In' && b.offsetParent !== null) {
-                            b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                            return;
-                        }
-                    }
-                }
-            """)
+    if "Sign In" in body and "Email" in body and "Password" in body and "Create Account" not in body.split("Sign In")[0]:
+        print("  → Signing in (stored credentials)...")
+        await page.locator('#input-4').fill(acct["email"])
+        await page.locator('#input-5').fill(acct["password"])
+        await page.wait_for_timeout(500)
+        if await wd_click("Sign In"):
             await page.wait_for_timeout(5000)
-        except Exception as e:
-            print(f"  ⚠ Sign-in failed: {e}")
+            body = await page.inner_text("body")
+            if "My Information" in body or "my information" in body.lower():
+                print("  ✅ SIGNED IN!")
+            elif "wrong" in body.lower():
+                print("  ⚠ Wrong password")
+                return "WRONG_PASSWORD"
+        else:
+            return "CLICK_FAILED"
     elif "Create Account" in body:
-        print("  → No stored account. Creating...")
+        print("  → Creating account...")
         pwd = _accounts.generate_password()
-        try:
-            await page.locator('input[data-automation-id="email"]').fill(acct["email"])
-            await page.locator('input[data-automation-id="password"]').fill(pwd)
-            await page.locator('input[data-automation-id="verifyPassword"]').fill(pwd)
-            await page.locator('input[data-automation-id="createAccountCheckbox"]').check()
-            await page.wait_for_timeout(500)
-            await page.evaluate("""
-                () => {
-                    const btns = document.querySelectorAll('button');
-                    for (const b of btns) {
-                        if (b.innerText.includes('Create Account')) {
-                            b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                            return;
-                        }
-                    }
-                }
-            """)
+        await page.locator('#input-4').fill(acct["email"])
+        await page.locator('#input-5').fill(pwd)
+        await page.locator('#input-6').fill(pwd)
+        await page.locator('#input-9').check()
+        await page.wait_for_timeout(500)
+        if await wd_click("Create Account"):
             await page.wait_for_timeout(5000)
-            # Save account
-            if domain:
-                _accounts.save_account(domain, acct["email"], pwd)
-            print(f"  ✅ Account created and saved")
-        except Exception as e:
-            print(f"  ⚠ Account creation error: {e}")
+            body = await page.inner_text("body")
+            if "My Information" in body or "my information" in body.lower():
+                if domain: _accounts.save_account(domain, acct["email"], pwd)
+                print("  ✅ ACCOUNT CREATED!")
+            else:
+                print(f"  After create: {body[:200]}")
+                return "CREATE_FAILED"
     
-    # Wait for Simplify to detect and fill
-    print("  → Waiting for Simplify autofill...")
+    # Wait for Simplify autofill
+    print("  → Waiting for Simplify...")
     await page.wait_for_timeout(8000)
     
-    body2 = await page.inner_text("body")
+    body = await page.inner_text("body")
+    if "Submit" in body or "Review" in body:
+        print("  → Submit/Review found")
+        return "READY_FOR_SUBMIT"
+    return "NO_SUBMIT"
     
-    if "Submit" in body2:
-        print("  → Submit button found!")
-        await page.evaluate("""
-            () => {
-                const btns = document.querySelectorAll('button');
-                for (const b of btns) {
-                    if (b.innerText.includes('Submit') && b.offsetParent !== null) {
-                        b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        return;
-                    }
-                }
-            }
-        """)
-        await page.wait_for_timeout(5000)
-        body3 = await page.inner_text("body")
-        if "thank you" in body3.lower() or "submitted" in body3.lower():
-            return "SUBMITTED"
-        else:
-            return f"CLICKED_SUBMIT: {page.url}"
-    else:
-        return f"NO_SUBMIT_BUTTON: {body2[:200]}"
+    return "SIGNED_IN"
 
 
 async def main():
