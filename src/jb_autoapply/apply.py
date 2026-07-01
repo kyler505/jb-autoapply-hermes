@@ -937,21 +937,40 @@ async def _fill_workday_fields(page) -> int:
         "State": "Texas",
         "Phone Device": "Mobile",
         "Device Type": "Mobile",
+        "Country": "United States of America",
+        "Phone Country": "United States (+1)",
     }
     try:
         for label_kw, value in select_one_map.items():
             # Find a "Select One" button near a label containing the keyword
             btn = page.locator(
-                f'button:has-text("Select One"):near(:text("{label_kw}", i))'
+                f'button:has-text("Select One"):near(:text("{label_kw}", i)), '
+                f'button:has-text("-- Select --"):near(:text("{label_kw}", i))'
             ).first
             if await btn.is_visible(timeout=100):
                 await btn.click()
                 await page.wait_for_timeout(400)
-                # Select the option
-                opt = page.locator(f'[role="option"]:has-text("{value}")').first
+                # Select the option — try multiple strategies
+                opt = page.locator(
+                    f'[role="option"]:has-text("{value}"), '
+                    f'li:has-text("{value}"), '
+                    f'div[role="listbox"] :text-is("{value}")'
+                ).first
                 if await opt.is_visible(timeout=1500):
                     await opt.click()
                     await page.wait_for_timeout(300)
+                    filled += 1
+                    continue
+                # Fallback: type in the search field and press Enter
+                search = page.locator(
+                    f'input[role="combobox"]:near(:text("{label_kw}", i)), '
+                    f'input[type="text"]:near(:text("{label_kw}", i))'
+                ).first
+                if await search.is_visible(timeout=300):
+                    await search.fill(value)
+                    await page.wait_for_timeout(300)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(500)
                     filled += 1
     except Exception:
         pass
