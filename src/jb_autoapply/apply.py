@@ -235,9 +235,17 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
     # -- PHASE 1: Navigate to apply page --
     print(f"  Navigating to apply page...")
-    await page.goto(apply_url, timeout=30000)
-    await page.wait_for_timeout(3000)
-    await _page_debug("apply-page")
+    try:
+        await page.goto(apply_url, timeout=20000, wait_until="domcontentloaded")
+    except Exception as e:
+        print(f"  ⚠ Navigation timeout: {e}")
+    await page.wait_for_timeout(2000)
+    body_snapshot = await _page_debug("apply-page")
+
+    # Dead posting check
+    if "doesn't exist" in body_snapshot.lower() or "not exist" in body_snapshot.lower():
+        print(f"  ✗ Job posting not found (dead link)")
+        return _error_result("dead_link", "Job posting no longer exists on Workday")
 
     # -- PHASE 2: Sign in if needed --
     if password:
@@ -318,6 +326,15 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     print(f"  Navigating to job posting...")
     await page.goto(url, timeout=30000)
     await page.wait_for_timeout(3000)
+
+    # Dead posting check on job page
+    try:
+        job_body = await page.inner_text("body")
+        if "doesn't exist" in job_body.lower() or "not exist" in job_body.lower():
+            print(f"  ✗ Job posting not found (dead link)")
+            return _error_result("dead_link", "Job posting no longer exists on Workday")
+    except Exception:
+        pass
 
     # Accept cookies
     await _click_visible_button(page, "Accept", "Accept Cookies", "Accept All", "I Accept")
@@ -1168,7 +1185,17 @@ class ApplyRunner:
                             page = await ctx.new_page()
                     except Exception:
                         print(f"  Page crashed — creating new one for job {idx+1}")
-                        page = await ctx.new_page()
+                        try:
+                            page = await ctx.new_page()
+                        except Exception:
+                            print(f"  Browser context dead — re-launching...")
+                            await ctx.close()
+                            ctx = await p.chromium.launch_persistent_context(
+                                user_data_dir=PROFILE,
+                                headless=False,
+                                args=ext_args,
+                            )
+                            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                     result = await self._process_one(page, job)
                     self.results.append(result)
