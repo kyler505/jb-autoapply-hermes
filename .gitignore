@@ -9,3 +9,14 @@ build/
 ~/.simplify/
 ~/.nopecha/
 /tmp/autoapply-*
+# Catch any root-level one-off scripts left behind
+apply_*.py
+retry_*.py
+simplify_*.py
+debug_*.py
+explore_*.py
+fix_*.py
+reset_*.py
+trigger_*.py
+final_*.py
+run_queue.py
