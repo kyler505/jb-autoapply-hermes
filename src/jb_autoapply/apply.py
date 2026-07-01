@@ -491,19 +491,65 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                     '[data-automation-id="email"], '
                     'input[aria-label*="email" i]'
                 ).first
-                if await email_input.is_visible(timeout=2000):
-                    await email_input.fill(email)
-                    pw_input = page.locator(
-                        'input[type="password"], '
-                        '[data-automation-id="password"]'
+                if await email_input.is_visible(timeout=3000):
+                    # Check if we need to create an account first
+                    create_acct_link = page.locator(
+                        '[data-automation-id="createAccountLink"], '
+                        'button:has-text("Create Account"):not([data-automation-id*="Submit"])'
                     ).first
-                    if await pw_input.is_visible(timeout=1000):
-                        await pw_input.fill(pwd)
-                        await page.wait_for_timeout(300)
-                        # Try Sign In button
-                        await _click_visible_button(page, "Sign In")
-                        await page.wait_for_timeout(5000)
-                        return True
+                    if await create_acct_link.is_visible(timeout=500):
+                        print(f"  Clicking 'Create Account' link (no existing account)...")
+                        await create_acct_link.click(force=True, timeout=3000)
+                        await page.wait_for_timeout(2000)
+                        # Now on the full Create Account form
+                        email_input = page.locator(
+                            'input[type="email"], [data-automation-id="email"]'
+                        ).first
+                        if await email_input.is_visible(timeout=2000):
+                            await email_input.fill(email)
+                            pw_input = page.locator(
+                                'input[type="password"], [data-automation-id="password"]'
+                            ).first
+                            if await pw_input.is_visible(timeout=500):
+                                await pw_input.fill(pwd)
+                                verify_pw = page.locator('[data-automation-id="verifyPassword"]')
+                                if await verify_pw.is_visible(timeout=300):
+                                    await verify_pw.fill(pwd)
+                                await page.wait_for_timeout(200)
+                                # Click via overlay
+                                create_overlay = page.locator(
+                                    '[data-automation-id="click_filter"][aria-label="Create Account"]'
+                                ).first
+                                if await create_overlay.is_visible(timeout=500):
+                                    await create_overlay.click(force=True, timeout=5000)
+                                else:
+                                    submit_btn = page.locator(
+                                        '[data-automation-id="createAccountSubmitButton"]'
+                                    ).first
+                                    if await submit_btn.is_visible(timeout=300):
+                                        await submit_btn.click(force=True, timeout=5000)
+                                await page.wait_for_timeout(5000)
+                                return True
+                    else:
+                        # Fill Sign In form
+                        await email_input.fill(email)
+                        pw_input = page.locator(
+                            'input[type="password"], '
+                            '[data-automation-id="password"]'
+                        ).first
+                        if await pw_input.is_visible(timeout=1000):
+                            await pw_input.fill(pwd)
+                            await page.wait_for_timeout(300)
+                            # Click the submit overlay directly
+                            submit_overlay = page.locator(
+                                '[data-automation-id="click_filter"][aria-label="Submit"]'
+                            ).first
+                            if await submit_overlay.is_visible(timeout=500):
+                                await submit_overlay.click(force=True, timeout=5000)
+                            else:
+                                await _click_visible_button(page, "Sign In")
+                            await page.wait_for_timeout(5000)
+                            return True
         except Exception:
             pass
 
