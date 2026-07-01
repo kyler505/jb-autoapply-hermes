@@ -816,6 +816,9 @@ async def _fill_workday_fields(page) -> int:
     # Radio button questions: (label text containing question, value text to select)
     radio_questions = [
         ("have you ever worked", "No"),
+        ("have you been employed", "No"),
+        ("currently employed", "No"),
+        ("have you previously", "No"),
     ]
     # Combobox/select fields: (label text, value to select)
     select_fields = [
