@@ -329,76 +329,94 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
     await _page_debug("after-apply-manually")
 
-    # -- PHASE 4: Handle Step 1 (Create Account / Sign In) --
-    step_email = page.locator('[data-automation-id="email"]')
-    if await step_email.is_visible(timeout=2000):
-        print(f"  Step 1: Create Account page")
-
-        # Check for error text first
-        body = await page.inner_text("body")
-        if any(p in body.lower() for p in ["wrong email", "incorrect", "locked", "already exists"]):
-            error_detail = ""
-            for p in ["wrong email", "incorrect", "locked", "already exists"]:
-                if p in body.lower():
-                    error_detail = p
-                    break
-            print(f"  ❌ Account error: {error_detail}")
-            return _error_result("step1_blocked",
-                f"Workday step 1 blocked: {error_detail}. Run 'jb-autoapply accounts-verify'")
-
-        # Fill the form
-        await step_email.fill(email)
-        pw = page.locator('[data-automation-id="password"]')
-        if await pw.is_visible(timeout=1000):
-            await pw.fill(password if password else _accounts.generate_password())
-
-        cb = page.locator('[data-automation-id="createAccountCheckbox"]')
-        if await cb.is_visible(timeout=500):
-            await cb.check()
-
-        await page.wait_for_timeout(500)
-
-        # Try clicking overlay directly first (has the real JS handler)
-        overlay = page.locator('[data-automation-id="click_filter"]')
-        if await overlay.is_visible(timeout=500):
-            print(f"  Clicking overlay on Create Account...")
-            await overlay.click(force=True, timeout=5000)
-            await page.wait_for_timeout(5000)
-        else:
-            # Try keyboard Enter
-            print(f"  Submitting Create Account via Enter...")
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(5000)
-
-            # If still there, remove overlay and click button directly
-            if await step_email.is_visible(timeout=1000):
-                print(f"  Still on step 1, removing overlay...")
-                await _remove_overlays(page)
-                await _click(page, '[data-automation-id="createAccountSubmitButton"]', timeout=3000)
-                await page.wait_for_timeout(5000)
-
-        await _page_debug("after-step1")
-
-        # Check if still on step 1
+    # -- PHASE 4: Handle wizard sign-in / create-account step --
+    # After clicking Apply Manually, Workday may show:
+    #   - "Create Account" (email field + password + checkbox)
+    #   - "Sign In" (email field + password)
+    #   - A "Sign In" modal/overlay with a different HTML structure
+    async def _handle_wizard_auth(page) -> bool:
+        """Try to handle a sign-in/auth wizard step. Returns True if advanced past it."""
+        # First check for the standard email field
+        step_email = page.locator('[data-automation-id="email"]')
         if await step_email.is_visible(timeout=1000):
+            print(f"  Wizard auth: email field found")
+
+            # Check for error text
             body = await page.inner_text("body")
-            if "already exists" in body.lower():
-                print(f"  Account already exists — switching to sign-in mode")
-                # Try clicking Sign In tab
-                await _click_visible_button(page, "Sign In")
-                await page.wait_for_timeout(3000)
-                if password:
-                    await page.locator('[data-automation-id="email"]').fill(email)
-                    await page.locator('[data-automation-id="password"]').fill(password)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_timeout(5000)
-                    await _page_debug("after-signin-alt")
-                else:
-                    print(f"  ❌ Account exists but no password stored")
-                    return _error_result("step1_blocked", "Account exists but no stored password")
+            if any(p in body.lower() for p in ["wrong email", "incorrect", "locked", "already exists"]):
+                for p in ["wrong email", "incorrect", "locked", "already exists"]:
+                    if p in body.lower():
+                        print(f"  ❌ Account error: {p}")
+                        return False
+
+            await step_email.fill(email)
+            pw_field = page.locator('[data-automation-id="password"]')
+            if await pw_field.is_visible(timeout=500):
+                await pw_field.fill(password if password else _accounts.generate_password())
+
+            # Check for Create Account checkbox
+            cb = page.locator('[data-automation-id="createAccountCheckbox"]')
+            if await cb.is_visible(timeout=300):
+                await cb.check()
+
+            await page.wait_for_timeout(300)
+
+            # Click overlay or submit
+            overlay = page.locator('[data-automation-id="click_filter"]')
+            if await overlay.is_visible(timeout=300):
+                await overlay.click(force=True, timeout=3000)
             else:
-                print(f"  ❌ Could not advance past step 1")
-                return _error_result("step1_blocked", f"Could not advance past Create Account step: {body[:200]}")
+                await page.keyboard.press("Enter")
+            await page.wait_for_timeout(4000)
+
+            # Check if still on step 1
+            if await step_email.is_visible(timeout=1000):
+                body = await page.inner_text("body")
+                if "already exists" in body.lower():
+                    print(f"  Account already exists — switching to sign-in mode")
+                    await _click_visible_button(page, "Sign In")
+                    await page.wait_for_timeout(2000)
+                    if password:
+                        await page.locator('[data-automation-id="email"]').fill(email)
+                        await page.locator('[data-automation-id="password"]').fill(password)
+                        await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(4000)
+                else:
+                    # Still stuck — try removing overlay and clicking submit button
+                    await _remove_overlays(page)
+                    await _click(page, '[data-automation-id="createAccountSubmitButton"]', timeout=2000)
+                    await page.wait_for_timeout(3000)
+                    if await step_email.is_visible(timeout=1000):
+                        print(f"  ⚠ Could not advance past wizard auth")
+                        return False
+            return True
+
+        # Check for Sign In modal/overlay (different structure — common on KLA-style)
+        # Look for heading or button text containing "Sign In"
+        try:
+            heading = page.locator('h1:has-text("Sign In"), h2:has-text("Sign In"), h3:has-text("Sign In")').first
+            if await heading.is_visible(timeout=500):
+                print(f"  Wizard auth: Sign In heading found (alternative layout)")
+                # Find email/password inputs by type
+                email_input = page.locator('input[type="email"]').first
+                if await email_input.is_visible(timeout=2000):
+                    await email_input.fill(email)
+                    pw_input = page.locator('input[type="password"]').first
+                    if await pw_input.is_visible(timeout=1000):
+                        await pw_input.fill(password if password else _accounts.generate_password())
+                        await page.wait_for_timeout(300)
+                        # Click Sign In button
+                        await _click_visible_button(page, "Sign In")
+                        await page.wait_for_timeout(5000)
+                        return True
+        except Exception:
+            pass
+
+        return False  # No auth step detected
+
+    # Run wizard auth handler
+    if await _handle_wizard_auth(page):
+        await _page_debug("after-wizard-auth")
 
     # -- PHASE 5: Wizard walk-through with Simplify --
     # Wait for Simplify to detect and fill
@@ -416,6 +434,74 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
     # Remove any initial overlays
     await _remove_overlays(page)
+
+    async def _scan_all_buttons(page) -> str | None:
+        """Scan every visible button and return the text of the first one that
+        looks like a forward-action button (submit, continue, next, agree, etc.)."""
+        keywords = ["submit", "continue", "next", "save", "finish", "done",
+                     "review", "agree", "accept", "confirm", "apply", "send"]
+        try:
+            all_buttons = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+                return Array.from(buttons).map(b => ({
+                    text: (b.innerText || b.value || '').trim().substring(0, 40),
+                    visible: b.offsetParent !== null,
+                    disabled: b.disabled || b.getAttribute('aria-disabled') === 'true'
+                }));
+            }""")
+            for btn in all_buttons:
+                if btn.get("visible") and not btn.get("disabled"):
+                    text = btn.get("text", "").lower()
+                    for kw in keywords:
+                        if kw in text:
+                            return btn["text"]
+        except Exception:
+            pass
+        return None
+
+    async def _handle_review_page(page) -> bool:
+        """Handle review page tasks: agreement checkboxes, electronic signature fields.
+        Returns True if it clicked something that should advance the page."""
+        try:
+            # Check for agreement/consent checkbox
+            agree_cb = page.locator(
+                'input[type="checkbox"]:near(:text("I agree")), '
+                'input[type="checkbox"]:near(:text("I consent")), '
+                'input[type="checkbox"]:near(:text("terms")), '
+                'input[type="checkbox"]:near(:text("signature"))'
+            ).first
+            if await agree_cb.is_visible(timeout=500):
+                if not await agree_cb.is_checked():
+                    await agree_cb.check()
+                    print(f"  ✓ Checked agreement/consent checkbox")
+                    await page.wait_for_timeout(500)
+                    return True
+
+            # Check for agreement checkbox by data-automation-id
+            cb2 = page.locator('[data-automation-id*="agree"], [data-automation-id*="consent"], '
+                               '[data-automation-id*="acceptTerms"]').first
+            if await cb2.is_visible(timeout=500):
+                if not await cb2.is_checked():
+                    await cb2.check()
+                    print(f"  ✓ Checked agreement checkbox (data-automation-id)")
+                    await page.wait_for_timeout(500)
+                    return True
+
+            # Check for electronic signature field (type full name)
+            sig_input = page.locator('input[data-automation-id*="signature"], '
+                                     'input[placeholder*="Full Name"], '
+                                     'input[placeholder*="signature"], '
+                                     'input[placeholder*="type your name"]').first
+            if await sig_input.is_visible(timeout=500):
+                current = await sig_input.input_value()
+                if not current.strip():
+                    await sig_input.fill("Kyler Cao")
+                    print(f"  ✓ Filled electronic signature")
+                    await page.wait_for_timeout(500)
+                    return True
+        except Exception:
+            pass
+        return False
 
     # Wizard loop
     last_body = ""
@@ -436,6 +522,35 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
             stuck_count += 1
             if stuck_count > 5:
                 print(f"  → Stuck at step {step_num+1} (page not changing)")
+                # Dump debug info before breaking
+                try:
+                    buttons = await page.evaluate("""() => Array.from(
+                        document.querySelectorAll('button, [role="button"], input[type="submit"]')
+                    ).map(b => ({
+                        text: (b.innerText || b.value || '').trim().substring(0, 50),
+                        visible: b.offsetParent !== null,
+                        disabled: b.disabled,
+                        'data-automation-id': b.getAttribute('data-automation-id') || ''
+                    })).filter(b => b.visible)""")
+                    if buttons:
+                        print(f"  📋 Visible buttons ({len(buttons)}):")
+                        for b in buttons[:20]:
+                            d = f"[{b['text']}] disabled={b['disabled']} auto-id={b.get('data-automation-id', '')}"
+                            print(f"    - {d}")
+                    inputs = await page.evaluate("""() => Array.from(
+                        document.querySelectorAll('input:not([type="hidden"])')
+                    ).map(inp => ({
+                        type: inp.type,
+                        placeholder: inp.placeholder || '',
+                        id: inp.id || '',
+                        'data-automation-id': inp.getAttribute('data-automation-id') || ''
+                    })).filter(inp => inp.type !== 'submit')""")
+                    if inputs:
+                        print(f"  📋 Visible inputs ({len(inputs)}):")
+                        for inp in inputs[:10]:
+                            print(f"    - type={inp['type']} placeholder={inp['placeholder'][:30]} id={inp['id'][:20]}")
+                except Exception:
+                    pass
                 break
         else:
             stuck_count = 0
@@ -443,6 +558,9 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
         # Remove blocking overlays
         await _remove_overlays(page)
+
+        # Handle review page tasks (agreement, signature)
+        await _handle_review_page(page)
 
         # Fill remaining fields periodically
         if step_num % 5 == 0:
@@ -464,6 +582,14 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
             await page.wait_for_timeout(3000)
             continue
 
+        # Try any visible button with a forward-action keyword
+        keyword_btn = await _scan_all_buttons(page)
+        if keyword_btn:
+            print(f"  → Clicking keyword-matched button: '{keyword_btn}'")
+            if await _click_text(page, keyword_btn):
+                await page.wait_for_timeout(4000)
+                continue
+
         # Last resort: keyboard Enter
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(2000)
@@ -476,6 +602,34 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
         if step_num == 0:
             print(f"  → No buttons found on first step")
+            # Dump debug info to understand the page state
+            try:
+                title = await page.title()
+                print(f"  📋 Page title: {title}")
+                url_cur = page.url[:100]
+                print(f"  📋 URL: {url_cur}")
+                buttons = await page.evaluate("""() => Array.from(
+                    document.querySelectorAll('button, [role="button"], input[type="submit"]')
+                ).map(b => ({
+                    text: (b.innerText || b.value || '').trim().substring(0, 50),
+                    visible: b.offsetParent !== null,
+                    disabled: b.disabled,
+                    'data-automation-id': b.getAttribute('data-automation-id') || ''
+                })).filter(b => b.visible)""")
+                if buttons:
+                    print(f"  📋 Visible buttons ({len(buttons)}):")
+                    for b in buttons[:20]:
+                        print(f"    - [{b['text']}] disabled={b['disabled']} auto-id={b.get('data-automation-id', '')}")
+                else:
+                    print(f"  📋 No visible buttons found")
+                # Check for any heading/instruction text
+                try:
+                    body_snippet = (await page.inner_text("body"))[:500]
+                    print(f"  📋 Body: {body_snippet}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
         break
 
     # Final submission check
@@ -488,7 +642,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         pass
 
     print(f"  → WIZARD_END")
-    return _error_result("wizard_end", "Reached end of wizard")
+    return _error_result("wizard_end", "Reached end of wizard — review debug output above")
 
 
 async def _fill_workday_fields(page) -> int:
@@ -772,6 +926,7 @@ class ApplyRunner:
         self.limit = limit
         self.rate_tracker = RateTracker()
         self.results: list[dict[str, Any]] = []
+        self.verified: list[dict[str, Any]] = []
 
     async def run(self) -> int:
         """Run the pipeline. Returns exit code (0 = all ok)."""
@@ -822,6 +977,10 @@ class ApplyRunner:
                     self.results.append(result)
                     write_back(job, result)
                     print()  # blank line between jobs
+
+                # Verification pass: re-check submitted jobs
+                verified = await self._verify_submissions(page, queue)
+                self.verified = verified
 
             finally:
                 await ctx.close()
@@ -899,6 +1058,110 @@ class ApplyRunner:
 
         return result
 
+    async def _verify_submissions(
+        self, page, queue: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Re-check submitted jobs to confirm they actually went through.
+
+        Navigates back to each 'success' result's URL and looks for
+        confirmation text. Reverts vault status if not confirmed.
+        Updates the result list with 'confirmed' flags.
+        """
+        from datetime import datetime
+
+        success_results = [
+            (i, r) for i, r in enumerate(self.results)
+            if r.get("result") == "success" and r.get("url")
+        ]
+
+        if not success_results:
+            return []
+
+        print(f"\n{'=' * 60}")
+        print(f"VERIFICATION PASS — {len(success_results)} jobs to re-check")
+        verified: list[dict[str, Any]] = []
+
+        for idx, (orig_idx, result) in enumerate(success_results):
+            company = result.get("company", "?")
+            url = result.get("url", "")
+            print(f"\n  [{idx + 1}/{len(success_results)}] {company}")
+            print(f"    {url[:80]}")
+
+            try:
+                await page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(5000)
+
+                body = await page.inner_text("body")
+                body_lower = body.lower()
+
+                # Check for confirmation signals
+                confirmed = any(w in body_lower for w in [
+                    "thank you", "submitted", "application has been submitted",
+                    "your application", "application received", "we've received",
+                    "successfully submitted", "application complete",
+                ])
+
+                if not confirmed:
+                    try:
+                        btn = page.get_by_role("button", name="Applied", exact=False)
+                        if await btn.count() > 0:
+                            confirmed = True
+                    except: pass
+
+                entry = {
+                    "company": company,
+                    "url": url,
+                    "original_result": result.get("status", "applied"),
+                    "confirmed": confirmed,
+                }
+                verified.append(entry)
+
+                if confirmed:
+                    print(f"    ✅ CONFIRMED — application went through")
+                else:
+                    print(f"    ❌ NOT CONFIRMED — reverting vault status")
+                    # Revert the vault note: set status back to 'to-apply'
+                    result["status"] = "to-apply"
+                    result["result"] = "not_confirmed"
+                    result["applied_date"] = None
+                    # Find matching job in queue and write back
+                    for job in queue:
+                        if job.get("url") == url or (
+                            job.get("company", "").lower() == company.lower()
+                        ):
+                            from .vault import read_note, set_fm_field, write_note
+                            path_obj = Path(job["path"])
+                            _, fm_text, body_text = read_note(path_obj)
+                            fm_text = set_fm_field(fm_text, "status", "to-apply")
+                            fm_text = set_fm_field(fm_text, "applied_date", None)
+                            fm_text = set_fm_field(fm_text, "apply_result", "not_confirmed")
+                            write_note(path_obj, fm_text, body_text)
+                            print(f"      Reverted {job.get('company', '?')} in vault")
+                            break
+
+            except Exception as exc:
+                print(f"    ⚠ Error checking: {exc}")
+                verified.append({
+                    "company": company,
+                    "url": url,
+                    "original_result": result.get("status", "applied"),
+                    "confirmed": False,
+                    "error": str(exc)[:100],
+                })
+
+        # Update results in-place
+        self.results = [
+            {**r, "confirmed": next(
+                (v["confirmed"] for v in verified if v["company"] == r.get("company") and v["url"] == r.get("url")),
+                False
+            )} if r.get("result") == "success" else r
+            for r in self.results
+        ]
+
+        confirmed_count = sum(1 for v in verified if v["confirmed"])
+        print(f"\n  Verification: {confirmed_count}/{len(verified)} confirmed")
+        return verified
+
     def _print_summary(self) -> None:
         print(f"\n{'=' * 60}")
         print("RESULTS:")
@@ -908,12 +1171,16 @@ class ApplyRunner:
         print(f"  ✅ Success: {successes}")
         print(f"  ❌ Errors:  {errors}")
         print(f"  ⏭️  Skips:   {skips}")
+        if self.verified:
+            confirmed = sum(1 for v in self.verified if v["confirmed"])
+            print(f"  🔍 Verified: {confirmed}/{len(self.verified)} confirmed")
         print(f"  Rate summary: {self.rate_tracker.summary}")
         for r in self.results:
             name = f"{r.get('company', '?')} — {r.get('role', '?')}"
             icon = "✅" if r["result"] == "success" else "❌" if r["result"] != "skipped" else "⏭️"
             err = f" — {r['error'][:60]}" if r.get("error") else ""
-            print(f"  {icon} {name}: {r['result']}{err}")
+            confirmed_tag = " [VERIFIED]" if r.get("confirmed") else " [NOT CONFIRMED]" if r.get("confirmed") is False and r.get("result") == "success" else ""
+            print(f"  {icon} {name}: {r['result']}{err}{confirmed_tag}")
 
 
 # ---------------------------------------------------------------------------
