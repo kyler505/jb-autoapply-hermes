@@ -555,7 +555,7 @@ async def _fill_workday_fields(page) -> int:
     return filled
 
 
-async def _handle_ashby(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
+async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ashby flow: upload resume, fill fields, submit."""
     url: str = job["url"]
 
@@ -581,7 +581,7 @@ async def _handle_ashby(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
     return await _click_submit_flow(page)
 
 
-async def _handle_greenhouse(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
+async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Greenhouse flow: fill fields, attach resume, submit."""
     url: str = job["url"]
 
@@ -606,7 +606,7 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
     return await _click_submit_flow(page)
 
 
-async def _handle_generic(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
+async def _handle_generic(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Generic/fallback flow: navigate, let Simplify fill, click submit."""
     url: str = job["url"]
 
@@ -640,12 +640,12 @@ async def _handle_generic(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
     return await _click_submit_flow(page)
 
 
-async def _handle_icims(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
+async def _handle_icims(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """iCIMS flow — may need account creation."""
     return await _handle_generic(page, ctx, job)
 
 
-async def _handle_smartrecruiters(page, ctx, job: dict[str, Any]) -> dict[str, Any]:
+async def _handle_smartrecruiters(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """SmartRecruiters flow."""
     return await _handle_generic(page, ctx, job)
 
