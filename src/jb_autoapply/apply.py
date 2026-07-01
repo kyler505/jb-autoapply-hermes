@@ -492,9 +492,8 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
 
 async def _fill_workday_fields(page) -> int:
-    """Fill common Workday fields that Simplify might miss."""
+    """Fill common Workday fields that Simplify might miss, including multiselect."""
     field_map = {
-        "source--source": "LinkedIn",
         "name--legalName--firstName": "Kyler",
         "name--legalName--lastName": "Cao",
         "address--addressLine1": "9810 Orchid Cove Court",
@@ -502,7 +501,13 @@ async def _fill_workday_fields(page) -> int:
         "address--postalCode": "77433",
         "phoneNumber--phoneNumber": "18329664150",
     }
+    # Multiselect fields: (container automation-id, value to select)
+    multiselect_fields = [
+        ("How Did You Hear About Us?", "Cox Career Site"),
+    ]
     filled = 0
+
+    # Regular text/input fields
     for field_id, value in field_map.items():
         try:
             el = page.locator(f"#{field_id}")
@@ -514,6 +519,39 @@ async def _fill_workday_fields(page) -> int:
                 filled += 1
         except Exception:
             pass
+
+    # Multiselect/combobox fields — click to open, then select option
+    for label, option_text in multiselect_fields:
+        try:
+            # Find the visible multiselect container by looking for the label text
+            # then clicking its sibling input container
+            label_el = page.locator(f'label:has-text("{label}"), span:has-text("{label}")').first
+            if not await label_el.is_visible(timeout=200):
+                continue
+
+            # Find the parent field container, then the multiselect div
+            field_group = label_el.locator('xpath=ancestor::div[contains(@data-automation-id, "formField")]')
+            multiselect = field_group.locator('[data-automation-id="multiselectInputContainer"]')
+
+            if await multiselect.is_visible(timeout=500):
+                # Check if already has a selection (text shows "1 item selected" not "0 items selected")
+                text = await multiselect.inner_text()
+                if "0 items selected" not in text:
+                    continue  # Already filled
+
+                # Click to open the dropdown
+                await multiselect.click()
+                await page.wait_for_timeout(500)
+
+                # Click the option with matching text
+                option = page.locator(f'[role="option"]:has-text("{option_text}")').first
+                if await option.is_visible(timeout=2000):
+                    await option.click()
+                    await page.wait_for_timeout(300)
+                    filled += 1
+        except Exception:
+            pass
+
     return filled
 
 
