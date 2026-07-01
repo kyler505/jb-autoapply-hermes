@@ -1,5 +1,11 @@
-out/
 __pycache__/
-.pytest_cache/
-.venv/
 *.pyc
+*.pyo
+out/
+.venv/
+*.egg-info/
+dist/
+build/
+~/.simplify/
+~/.nopecha/
+/tmp/autoapply-*
