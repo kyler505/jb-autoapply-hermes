@@ -572,11 +572,20 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         # Check if redirected to a login page after account creation
         if "login" in page.url.lower():
             print(f"  ⚠ Redirected to login page — signing in with new credentials...")
-            # Fill email
+            await page.wait_for_timeout(2000)
+            # Wait for the email field to appear
+            try:
+                await page.wait_for_selector(
+                    '[data-automation-id="email"]',
+                    timeout=8000
+                )
+            except Exception:
+                print(f"  ⚠ Email field didn't appear on login page")
+            # Fill email — Workday login uses type="text" not type="email"
             email_input = page.locator(
-                'input[type="email"], [data-automation-id="email"]'
+                '[data-automation-id="email"]'
             ).first
-            if await email_input.is_visible(timeout=2000):
+            if await email_input.is_visible(timeout=1000):
                 await email_input.fill(email)
                 pw_input = page.locator(
                     'input[type="password"], [data-automation-id="password"]'
