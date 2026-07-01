@@ -359,7 +359,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     #   - "Create Account" (email field + password + checkbox)
     #   - "Sign In" (email field + password)
     #   - A "Sign In" modal/overlay with a different HTML structure
-    async def _handle_wizard_auth(page, pwd: str) -> bool:
+    async def _handle_wizard_auth(page, pwd: str, *, has_account: bool = False) -> bool:
         """Try to handle a sign-in/auth wizard step. Returns True if advanced past it."""
         # Find the email field using multiple strategies
         step_email = page.locator('[data-automation-id="email"]')
@@ -492,7 +492,29 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                     'input[aria-label*="email" i]'
                 ).first
                 if await email_input.is_visible(timeout=3000):
-                    # Check if we need to create an account first
+                    # If we have stored credentials, sign in directly instead of
+                    # clicking "Create Account" — some Workday sites (KLA, CVS, etc.)
+                    # show both "Create Account" AND "Sign In" on the same page.
+                    if has_account:
+                        print(f"  Existing account found — signing in directly")
+                        await email_input.fill(email)
+                        pw_input = page.locator(
+                            'input[type="password"], '
+                            '[data-automation-id="password"]'
+                        ).first
+                        if await pw_input.is_visible(timeout=1000):
+                            await pw_input.fill(pwd)
+                            await page.wait_for_timeout(300)
+                            submit_overlay = page.locator(
+                                '[data-automation-id="click_filter"][aria-label="Submit"]'
+                            ).first
+                            if await submit_overlay.is_visible(timeout=500):
+                                await submit_overlay.click(force=True, timeout=5000)
+                            else:
+                                await _click_visible_button(page, "Sign In")
+                            await page.wait_for_timeout(5000)
+                            return True
+                    # No stored account — create one via the Create Account link
                     create_acct_link = page.locator(
                         '[data-automation-id="createAccountLink"], '
                         'button:has-text("Create Account"):not([data-automation-id*="Submit"])'
@@ -558,7 +580,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     # Run wizard auth handler
     generated_pw = _accounts.generate_password()
     actual_pw = password if password else generated_pw
-    if await _handle_wizard_auth(page, actual_pw):
+    if await _handle_wizard_auth(page, actual_pw, has_account=(password is not None)):
         # If we generated a password and created an account, save it
         if password is None:
             sl = page.locator('button:has-text("Create Account"), [data-automation-id="createAccountSubmitButton"]')
