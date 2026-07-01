@@ -258,12 +258,20 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                     await page.wait_for_timeout(500)
 
                     # Strategy 1: Try clicking the overlay directly (it has the JS handler)
-                    overlay = page.locator('[data-automation-id="click_filter"]')
+                    overlay = page.locator('[data-automation-id="click_filter"][aria-label="Sign In"]')
                     if await overlay.is_visible(timeout=500):
-                        print(f"  Clicking overlay directly...")
+                        print(f"  Clicking Sign In overlay directly...")
                         await overlay.click(force=True, timeout=5000)
                         await page.wait_for_timeout(5000)
                     else:
+                        # Fallback: generic click_filter
+                        overlay_generic = page.locator('[data-automation-id="click_filter"]')
+                        if await overlay_generic.is_visible(timeout=500):
+                            await overlay_generic.click(force=True, timeout=5000)
+                            await page.wait_for_timeout(5000)
+                    
+                    # Check if still on sign-in
+                    if await email_field.is_visible(timeout=1000):
                         # Strategy 2: Enter key
                         print(f"  Submitting via Enter...")
                         await page.keyboard.press("Enter")
