@@ -1157,9 +1157,19 @@ class ApplyRunner:
             )
 
             try:
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-
                 for idx, job in enumerate(queue):
+                    # Re-create page if the previous job crashed it
+                    page = None
+                    try:
+                        if ctx.pages:
+                            page = ctx.pages[0]
+                            _ = await page.title()
+                        else:
+                            page = await ctx.new_page()
+                    except Exception:
+                        print(f"  Page crashed — creating new one for job {idx+1}")
+                        page = await ctx.new_page()
+
                     result = await self._process_one(page, job)
                     self.results.append(result)
                     write_back(job, result)
