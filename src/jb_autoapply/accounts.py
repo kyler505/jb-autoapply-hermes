@@ -33,7 +33,7 @@ def _save(data: dict[str, Any]) -> None:
     ACCOUNTS_FILE.chmod(0o600)
 
 
-def tenant_domain(url: str) -> str | None:
+def tenant_domain(url: str | bytes) -> str | None:
     """Extract the Workday tenant domain from a job URL.
 
     'https://cox.wd1.myworkdayjobs.com/...' -> 'cox.wd1.myworkdayjobs.com'
@@ -41,6 +41,10 @@ def tenant_domain(url: str) -> str | None:
     'https://jobs.ashbyhq.com/...' -> None (Ashby uses SSO/social login)
     """
     from urllib.parse import urlparse
+    if url is None:
+        return None
+    if isinstance(url, bytes):
+        url = url.decode("utf-8")
     domain = urlparse(url).netloc.lower()
     if "myworkdayjobs" in domain:
         return domain
@@ -127,6 +131,110 @@ def has_account(url: str) -> bool:
     if not domain:
         return False
     return get_account(domain) is not None
+
+
+async def verify_credentials(
+    domain: str,
+    *,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Verify stored credentials by attempting to sign in via Playwright.
+
+    Opens a headless browser, navigates to the Workday sign-in page,
+    fills credentials, and checks if sign-in succeeds.
+
+    Returns a dict with keys:
+        valid (bool): True if sign-in appeared to work
+        message (str): Human-readable result
+        error (str | None): Error detail if invalid
+    """
+    acct = get_account(domain)
+    if not acct:
+        return {"valid": False, "message": f"No stored account for {domain}", "error": "no_account"}
+
+    from playwright.async_api import async_playwright
+
+    url = f"https://{domain}/login"
+    result = {"valid": False, "message": "", "error": None}
+
+    async with async_playwright() as p:
+        ctx = await p.chromium.launch_persistent_context(
+            user_data_dir=f"/tmp/wd-verify-{domain.replace('.', '-')}",
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+
+            # Fill credentials
+            el = page.locator('[data-automation-id="email"]')
+            if await el.is_visible(timeout=5000):
+                await el.fill(acct["email"])
+                pw = page.locator('[data-automation-id="password"]')
+                if await pw.is_visible(timeout=2000):
+                    await pw.fill(acct["password"])
+                    await page.wait_for_timeout(500)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(5000)
+
+                    # Check for error
+                    body = await page.inner_text("body")
+                    if "wrong email" in body.lower() or "incorrect" in body.lower() or "invalid" in body.lower():
+                        result["valid"] = False
+                        result["message"] = "Invalid credentials"
+                        result["error"] = "invalid_credentials"
+                    elif await page.locator('[data-automation-id="accountMenuButton"]').is_visible(timeout=3000):
+                        result["valid"] = True
+                        result["message"] = "Sign-in successful"
+                    else:
+                        result["message"] = "Sign-in completed but unable to confirm"
+                        result["error"] = "unconfirmed"
+                else:
+                    result["message"] = "No password field found"
+                    result["error"] = "no_password_field"
+            else:
+                # Maybe already signed in
+                if await page.locator('[data-automation-id="accountMenuButton"]').is_visible(timeout=2000):
+                    result["valid"] = True
+                    result["message"] = "Already signed in"
+                else:
+                    result["message"] = "No email field found on login page"
+                    result["error"] = "no_login_form"
+        except Exception as exc:
+            result["message"] = f"Verification error: {exc}"
+            result["error"] = "exception"
+        finally:
+            await ctx.close()
+
+    return result
+
+
+def verify_all_accounts() -> list[dict[str, Any]]:
+    """Verify all stored Workday accounts sequentially.
+
+    Returns a list of result dicts, one per account.
+    """
+    import asyncio
+
+    data = _load()
+    results = []
+    for domain in data:
+        try:
+            r = asyncio.run(verify_credentials(domain))
+            r["domain"] = domain
+            r["company"] = resolve_tenant_name(domain)
+            results.append(r)
+        except Exception as exc:
+            results.append({
+                "domain": domain,
+                "company": resolve_tenant_name(domain),
+                "valid": False,
+                "message": f"Async error: {exc}",
+                "error": "exception",
+            })
+    return results
 
 
 def get_or_create_account(

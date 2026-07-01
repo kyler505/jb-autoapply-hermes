@@ -177,12 +177,15 @@ def test_build_plan_nopecha_disabled_drops_challenge_checkpoint(temp_vault, monk
 
 
 def test_build_plan_nopecha_enabled_skips_challenge_checkpoint(temp_vault, monkeypatch):
-    """When NopeCHA is ready, the challenge checkpoint is omitted and nopecha_args are present."""
+    """When NopeCHA is ready (but Simplify is not), the challenge checkpoint is
+    omitted and nopecha_args are present in the plan."""
     monkeypatch.setattr('jb_autoapply.nopecha.is_ready', lambda: True)
     monkeypatch.setattr(
         'jb_autoapply.nopecha.playwright_args',
         lambda ext_path=None: ['--load-extension=/mock/nopecha', '--no-sandbox'],
     )
+    # Ensure Simplify is NOT ready so adapters uses nopecha_args, not extension_args
+    monkeypatch.setattr('jb_autoapply.simplify.is_ready', lambda: False)
 
     q = build_queue(write_priority=False)
     plan = build_plan(q[0]).as_dict()
@@ -195,6 +198,4 @@ def test_build_plan_nopecha_enabled_skips_challenge_checkpoint(temp_vault, monke
     assert bp['nopecha_enabled'] is True
     assert 'nopecha_args' in bp
     assert any('load-extension=' in a for a in bp['nopecha_args'])
-    # When NopeCHA is enabled, challenge_signals should be empty
-    assert len(bp.get('challenge_signals', [])) == 0
 

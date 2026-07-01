@@ -7,6 +7,7 @@ from pathlib import Path
 from . import config
 from . import nopecha as _nopecha
 from .adapters import build_plan, detect_site
+from .apply import apply_queue
 from .build_resume import compile_resume, resume_name_for_category
 from .checkpoints import create_checkpoint, list_checkpoints, resolve_checkpoint
 from .prepare import prepare_queue
@@ -188,6 +189,22 @@ def _accounts_gen(url: str, email: str) -> int:
         return 1
 
 
+def _accounts_verify() -> int:
+    """Verify all stored Workday credentials."""
+    print("Verifying stored Workday credentials...")
+    results = _accounts.verify_all_accounts()
+    print(f"\nResults ({len(results)} accounts):")
+    for r in results:
+        icon = "✅" if r["valid"] else "❌"
+        print(f"  {icon} {r['company']:20s} ({r.get('domain', '')})")
+        print(f"      {r.get('message', r.get('error', 'unknown'))}")
+    return 0 if all(r["valid"] for r in results) else 1
+
+
+def _apply(limit: int | None = None, dry_run: bool = False) -> int:
+    return apply_queue(limit=limit, dry_run=dry_run)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='jb-autoapply')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -231,6 +248,10 @@ def main(argv: list[str] | None = None) -> int:
     p_agen = sub.add_parser('accounts-gen')
     p_agen.add_argument('url', help='Job URL to generate account for')
     p_agen.add_argument('email', nargs='?', default='kcao@tamu.edu')
+    sub.add_parser('accounts-verify', help='Verify stored Workday credentials by attempting sign-in')
+    p_apply = sub.add_parser('apply', help='Run the apply pipeline on the queue')
+    p_apply.add_argument('--limit', type=int, default=None, help='Max jobs to process')
+    p_apply.add_argument('--dry-run', action='store_true', help='Preview what would happen without actually submitting')
 
     args = ap.parse_args(argv)
     if args.cmd == 'doctor':
@@ -274,6 +295,10 @@ def main(argv: list[str] | None = None) -> int:
         return _accounts_add(args.domain, args.email, args.password)
     if args.cmd == 'accounts-gen':
         return _accounts_gen(args.url, args.email)
+    if args.cmd == 'accounts-verify':
+        return _accounts_verify()
+    if args.cmd == 'apply':
+        return _apply(limit=args.limit, dry_run=args.dry_run)
     return 1
 
 
