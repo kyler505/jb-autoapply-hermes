@@ -334,7 +334,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     #   - "Create Account" (email field + password + checkbox)
     #   - "Sign In" (email field + password)
     #   - A "Sign In" modal/overlay with a different HTML structure
-    async def _handle_wizard_auth(page) -> bool:
+    async def _handle_wizard_auth(page, pwd: str) -> bool:
         """Try to handle a sign-in/auth wizard step. Returns True if advanced past it."""
         # Find the email field using multiple strategies
         step_email = page.locator('[data-automation-id="email"]')
@@ -360,7 +360,12 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
             await step_email.fill(email)
             pw_field = page.locator('[data-automation-id="password"], input[type="password"]').first
             if await pw_field.is_visible(timeout=500):
-                await pw_field.fill(password if password else _accounts.generate_password())
+                await pw_field.fill(pwd)
+                # Workday Create Account requires a "Verify New Password" field
+                verify_pw = page.locator('[data-automation-id="verifyPassword"]')
+                if await verify_pw.is_visible(timeout=300):
+                    await verify_pw.fill(pwd)
+                    await page.wait_for_timeout(200)
 
             # Check for Create Account checkbox
             cb = page.locator('[data-automation-id="createAccountCheckbox"]')
@@ -459,7 +464,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                         '[data-automation-id="password"]'
                     ).first
                     if await pw_input.is_visible(timeout=1000):
-                        await pw_input.fill(password if password else _accounts.generate_password())
+                        await pw_input.fill(pwd)
                         await page.wait_for_timeout(300)
                         # Try Sign In button
                         await _click_visible_button(page, "Sign In")
@@ -471,7 +476,18 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         return False  # No auth step detected
 
     # Run wizard auth handler
-    if await _handle_wizard_auth(page):
+    generated_pw = _accounts.generate_password()
+    actual_pw = password if password else generated_pw
+    if await _handle_wizard_auth(page, actual_pw):
+        # If we generated a password and created an account, save it
+        if password is None:
+            sl = page.locator('button:has-text("Create Account"), [data-automation-id="createAccountSubmitButton"]')
+            gone = not await sl.is_visible(timeout=500)
+            if gone:
+                # Account was created or signed in — save credentials
+                if domain:
+                    _accounts.save_account(domain, email, actual_pw)
+                    print(f"  ✓ Saved new account for {domain}")
         await _page_debug("after-wizard-auth")
 
     # -- PHASE 5: Wizard walk-through with Simplify --
