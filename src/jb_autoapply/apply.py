@@ -564,11 +564,42 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
             sl = page.locator('button:has-text("Create Account"), [data-automation-id="createAccountSubmitButton"]')
             gone = not await sl.is_visible(timeout=500)
             if gone:
-                # Account was created or signed in — save credentials
                 if domain:
                     _accounts.save_account(domain, email, actual_pw)
                     print(f"  ✓ Saved new account for {domain}")
         await _page_debug("after-wizard-auth")
+
+        # Check if redirected to a login page after account creation
+        if "login" in page.url.lower():
+            print(f"  ⚠ Redirected to login page — signing in with new credentials...")
+            # Fill email
+            email_input = page.locator(
+                'input[type="email"], [data-automation-id="email"]'
+            ).first
+            if await email_input.is_visible(timeout=2000):
+                await email_input.fill(email)
+                pw_input = page.locator(
+                    'input[type="password"], [data-automation-id="password"]'
+                ).first
+                if await pw_input.is_visible(timeout=500):
+                    await pw_input.fill(actual_pw if password is None else password)
+                    await page.wait_for_timeout(200)
+                    # Click Submit overlay or button
+                    submit_overlay = page.locator(
+                        '[data-automation-id="click_filter"][aria-label="Submit"]'
+                    ).first
+                    if await submit_overlay.is_visible(timeout=500):
+                        await submit_overlay.click(force=True, timeout=5000)
+                    else:
+                        si_btn = page.locator(
+                            '[data-automation-id="signInSubmitButton"]'
+                        ).first
+                        if await si_btn.is_visible(timeout=300):
+                            await si_btn.click(force=True, timeout=5000)
+                        else:
+                            await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(5000)
+                    await _page_debug("after-login")
 
     # -- PHASE 5: Wizard walk-through with Simplify --
     # Wait for Simplify to detect and fill
