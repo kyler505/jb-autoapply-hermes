@@ -164,103 +164,263 @@ async def _wait_for_stable(page, timeout: float = 3.0, interval: float = 0.5) ->
 # ATS-specific handlers
 # ---------------------------------------------------------------------------
 async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None) -> dict[str, Any]:
-    """Workday flow: sign-in, navigate wizard, fill, submit."""
+    """Workday flow: sign-in, navigate wizard, fill, submit.
+
+    Handles multiple Workday states:
+    - Already signed in → direct to wizard
+    - Sign-in link visible → click, fill, submit
+    - Create Account form → fill, submit
+    - Wrong password → detect error text
+    - Account already exists → switch to sign-in mode
+    """
     url: str = job["url"]
     company: str = job["company"]
     email = "kcao@tamu.edu"
     password = acct["password"] if acct else None
+    domain = _accounts.tenant_domain(url)
+
+    async def _page_debug(label: str) -> str:
+        """Log a snippet of the current page for debugging."""
+        try:
+            title = await page.title()
+            url_cur = page.url[:80]
+            body = (await page.inner_text("body"))[:300]
+            # Check for common error indicators
+            errors = []
+            for phrase in ["wrong email", "incorrect", "invalid", "not found", "does not exist", "locked"]:
+                if phrase in body.lower():
+                    errors.append(phrase)
+            debug = f"[{label}] {title[:50]} | {url_cur}"
+            if errors:
+                debug += f" | ⚠ ERRORS: {', '.join(errors)}"
+            print(f"  {debug}")
+            return body
+        except Exception as e:
+            print(f"  [{label}] error getting debug: {e}")
+            return ""
+
+    async def _find_visible_button(page, *names: str) -> str | None:
+        """Find the first visible button matching any of the given names."""
+        for name in names:
+            try:
+                btn = page.get_by_role("button", name=name, exact=False)
+                if await btn.count() > 0:
+                    for i in range(min(await btn.count(), 5)):
+                        try:
+                            if await btn.nth(i).is_visible(timeout=300):
+                                # Scroll into view
+                                await btn.nth(i).scroll_into_view_if_needed(timeout=1000)
+                                return name
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return None
+
+    async def _click_visible_button(page, *names: str) -> bool:
+        """Click the first visible button matching any name."""
+        name = await _find_visible_button(page, *names)
+        if name:
+            print(f"  → Clicking '{name}'")
+            try:
+                btn = page.get_by_role("button", name=name, exact=False)
+                await btn.first.scroll_into_view_if_needed(timeout=2000)
+                await btn.first.click(force=True, timeout=5000)
+                return True
+            except Exception:
+                pass
+        return False
 
     apply_url = url.rstrip("/") + "/apply/applyManually"
 
-    # Navigate to apply page
+    # -- PHASE 1: Navigate to apply page --
+    print(f"  Navigating to apply page...")
     await page.goto(apply_url, timeout=30000)
     await page.wait_for_timeout(3000)
+    await _page_debug("apply-page")
 
-    # -- Sign in if we have credentials --
+    # -- PHASE 2: Sign in if needed --
     if password:
         sl = page.locator('[data-automation-id="signInLink"]')
         if await sl.is_visible(timeout=2000):
+            print(f"  Sign-in link visible, clicking...")
             await sl.click()
             await page.wait_for_timeout(2000)
+            await _page_debug("after-signin-click")
 
-            await page.locator('[data-automation-id="email"]').fill(email)
-            await page.locator('[data-automation-id="password"]').fill(password)
-            await page.wait_for_timeout(500)
+            # Fill credentials
+            email_field = page.locator('[data-automation-id="email"]')
+            if await email_field.is_visible(timeout=3000):
+                await email_field.fill(email)
+                pw_field = page.locator('[data-automation-id="password"]')
+                if await pw_field.is_visible(timeout=1000):
+                    await pw_field.fill(password)
+                    await page.wait_for_timeout(500)
 
-            # Try Enter key (bypasses overlay)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(3000)
+                    # Strategy 1: Try clicking the overlay directly (it has the JS handler)
+                    overlay = page.locator('[data-automation-id="click_filter"]')
+                    if await overlay.is_visible(timeout=500):
+                        print(f"  Clicking overlay directly...")
+                        await overlay.click(force=True, timeout=5000)
+                        await page.wait_for_timeout(5000)
+                    else:
+                        # Strategy 2: Enter key
+                        print(f"  Submitting via Enter...")
+                        await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(3000)
 
-            # Check if still on sign-in page
-            if await page.locator('[data-automation-id="email"]').is_visible(timeout=1000):
-                # Overlay blocking — remove and click
-                await _remove_overlays(page)
-                await _click(page, '[data-automation-id="signInSubmitButton"]', timeout=3000)
-                await page.wait_for_timeout(5000)
+                        # Strategy 3: If still on sign-in, remove overlay and click button
+                        if await email_field.is_visible(timeout=1000):
+                            print(f"  Still on sign-in, removing overlay...")
+                            await _remove_overlays(page)
+                            await _click(page, '[data-automation-id="signInSubmitButton"]', timeout=3000)
+                            await page.wait_for_timeout(5000)
 
-            # Check sign-in success
+                    # Check result
+                    await _page_debug("after-signin-submit")
+                    body = await page.inner_text("body")
+
+                    # Check for error
+                    if any(p in body.lower() for p in ["wrong email", "incorrect", "invalid", "not found", "locked"]):
+                        print(f"  ❌ Sign-in failed: wrong email or password")
+                        return _error_result("password_wrong",
+                            f"Wrong email or password for {domain} — run 'jb-autoapply accounts-verify'")
+
+                    # Check for signed-in indicator
+                    signed_in = await page.locator(
+                        '[data-automation-id="accountMenuButton"], '
+                        'button:has-text("My Account"), '
+                        '[aria-label*="account" i]'
+                    ).is_visible(timeout=3000)
+                    if signed_in:
+                        print(f"  ✓ Signed in")
+                    else:
+                        print(f"  ⚠ Sign-in state uncertain — continuing")
+        else:
+            # Check if already signed in
             signed_in = await page.locator(
-                '[data-automation-id="accountMenuButton"], button:has-text("My Account")'
-            ).is_visible(timeout=2000)
+                '[data-automation-id="accountMenuButton"]'
+            ).is_visible(timeout=1000)
             if signed_in:
-                print(f"  ✓ Signed in as {email}")
-            else:
-                # Check for error
-                body_text = await page.inner_text("body")
-                if "wrong email" in body_text.lower() or "incorrect" in body_text.lower():
-                    return _error_result("password_wrong", "Wrong email or password — needs forgot-password")
+                print(f"  Already signed in ✓")
+    else:
+        print(f"  No stored credentials — will create account if needed")
 
-    # -- Navigate to job posting and start apply --
+    # -- PHASE 3: Navigate to job and click Apply --
+    print(f"  Navigating to job posting...")
     await page.goto(url, timeout=30000)
     await page.wait_for_timeout(3000)
 
-    # Accept cookies if present
-    await _click_text(page, "Accept")
+    # Accept cookies
+    await _click_visible_button(page, "Accept", "Accept Cookies", "Accept All", "I Accept")
+    await page.wait_for_timeout(1000)
 
-    # Click Apply button
-    await _click(page, '[data-automation-id="adventureButton"]')
+    await _page_debug("job-page")
+
+    # Click Apply / Adventure button
+    await _click(page, '[data-automation-id="adventureButton"]', timeout=3000)
     await page.wait_for_timeout(3000)
 
-    # Click "Apply Manually"
+    # Click Apply Manually
     if not await _click(page, '[data-automation-id="applyManually"]', timeout=4000):
-        # Maybe already at the form
-        pass
+        # Maybe already at the form or using "Use My Last Application"
+        await _page_debug("after-apply")
     await page.wait_for_timeout(3000)
 
-    # -- Step 1: Handle Create Account / Sign In form --
+    await _page_debug("after-apply-manually")
+
+    # -- PHASE 4: Handle Step 1 (Create Account / Sign In) --
     step_email = page.locator('[data-automation-id="email"]')
     if await step_email.is_visible(timeout=2000):
         print(f"  Step 1: Create Account page")
+
+        # Check for error text first
+        body = await page.inner_text("body")
+        if any(p in body.lower() for p in ["wrong email", "incorrect", "locked", "already exists"]):
+            error_detail = ""
+            for p in ["wrong email", "incorrect", "locked", "already exists"]:
+                if p in body.lower():
+                    error_detail = p
+                    break
+            print(f"  ❌ Account error: {error_detail}")
+            return _error_result("step1_blocked",
+                f"Workday step 1 blocked: {error_detail}. Run 'jb-autoapply accounts-verify'")
+
+        # Fill the form
         await step_email.fill(email)
         pw = page.locator('[data-automation-id="password"]')
         if await pw.is_visible(timeout=1000):
             await pw.fill(password if password else _accounts.generate_password())
+
         cb = page.locator('[data-automation-id="createAccountCheckbox"]')
         if await cb.is_visible(timeout=500):
             await cb.check()
+
         await page.wait_for_timeout(500)
 
-        # Submit
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(5000)
-
-        # If still on step 1, try overlay removal + direct click
-        if await page.locator('[data-automation-id="email"]').is_visible(timeout=1000):
-            await _remove_overlays(page)
-            await _click(page, '[data-automation-id="createAccountSubmitButton"]')
+        # Try clicking overlay directly first (has the real JS handler)
+        overlay = page.locator('[data-automation-id="click_filter"]')
+        if await overlay.is_visible(timeout=500):
+            print(f"  Clicking overlay on Create Account...")
+            await overlay.click(force=True, timeout=5000)
+            await page.wait_for_timeout(5000)
+        else:
+            # Try keyboard Enter
+            print(f"  Submitting Create Account via Enter...")
+            await page.keyboard.press("Enter")
             await page.wait_for_timeout(5000)
 
+            # If still there, remove overlay and click button directly
+            if await step_email.is_visible(timeout=1000):
+                print(f"  Still on step 1, removing overlay...")
+                await _remove_overlays(page)
+                await _click(page, '[data-automation-id="createAccountSubmitButton"]', timeout=3000)
+                await page.wait_for_timeout(5000)
+
+        await _page_debug("after-step1")
+
         # Check if still on step 1
-        if await page.locator('[data-automation-id="email"]').is_visible(timeout=1000):
-            return _error_result("step1_blocked", "Could not advance past Create Account step")
+        if await step_email.is_visible(timeout=1000):
+            body = await page.inner_text("body")
+            if "already exists" in body.lower():
+                print(f"  Account already exists — switching to sign-in mode")
+                # Try clicking Sign In tab
+                await _click_visible_button(page, "Sign In")
+                await page.wait_for_timeout(3000)
+                if password:
+                    await page.locator('[data-automation-id="email"]').fill(email)
+                    await page.locator('[data-automation-id="password"]').fill(password)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(5000)
+                    await _page_debug("after-signin-alt")
+                else:
+                    print(f"  ❌ Account exists but no password stored")
+                    return _error_result("step1_blocked", "Account exists but no stored password")
+            else:
+                print(f"  ❌ Could not advance past step 1")
+                return _error_result("step1_blocked", f"Could not advance past Create Account step: {body[:200]}")
 
-    # -- Wizard: walk through steps, let Simplify fill, then fill gaps --
-    print(f"  Simplify...")
-    await page.wait_for_timeout(8000)  # Give Simplify time to fill
+    # -- PHASE 5: Wizard walk-through with Simplify --
+    # Wait for Simplify to detect and fill
+    print(f"  Waiting for Simplify...")
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(8000)
 
+    # Fill any remaining fields
+    filled = await _fill_workday_fields(page)
+    if filled:
+        print(f"  Filled {filled} field(s) Simplify missed")
+
+    # Remove any initial overlays
+    await _remove_overlays(page)
+
+    # Wizard loop
     last_body = ""
     stuck_count = 0
-    for step in range(500):
+    for step_num in range(500):
         try:
             body = await page.inner_text("body")
         except Exception:
@@ -268,67 +428,67 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
         # Check for submission confirmation
         if any(w in body.lower() for w in ["thank you", "submitted", "Your application", "application has been submitted"]):
-            print(f"  ✅ SUBMITTED at step {step+1}!")
+            print(f"  ✅ SUBMITTED at step {step_num+1}!")
             return _success_result()
 
         # Stuck detection
         if body == last_body:
             stuck_count += 1
             if stuck_count > 5:
-                print(f"  → Stuck at step {step+1}")
+                print(f"  → Stuck at step {step_num+1} (page not changing)")
                 break
         else:
             stuck_count = 0
             last_body = body
 
-        # Remove any blocking overlays
+        # Remove blocking overlays
         await _remove_overlays(page)
 
-        # Try fill unfilled fields using FIELD_MAP (Workday-specific)
-        filled = await _fill_workday_fields(page)
-        if filled and step < 5:
-            print(f"  Filled {filled} remaining field(s)")
+        # Fill remaining fields periodically
+        if step_num % 5 == 0:
+            f2 = await _fill_workday_fields(page)
+            if f2 and step_num < 10:
+                print(f"  Filled {f2} remaining field(s) at step {step_num+1}")
 
-        # Submit / advance buttons
-        clicked = False
-        for btn_name in ["Submit Application", "Submit", "Review and Submit", "Finish", "Done", "Review"]:
-            if await _click_text(page, btn_name, timeout=500):
-                await page.wait_for_timeout(4000)
-                clicked = True
-                break
+        # Try submit buttons first
+        clicked = await _click_visible_button(page,
+            "Submit Application", "Submit", "Review and Submit", "Finish", "Done", "Review")
+        if clicked:
+            await page.wait_for_timeout(4000)
+            continue
 
-        if not clicked:
-            for btn_name in ["Save and Continue", "Save & Continue", "Continue", "Next", "Save"]:
-                if await _click_text(page, btn_name, timeout=500):
-                    await page.wait_for_timeout(3000)
-                    clicked = True
-                    break
+        # Then try advance buttons
+        clicked = await _click_visible_button(page,
+            "Save and Continue", "Save & Continue", "Continue", "Next", "Save")
+        if clicked:
+            await page.wait_for_timeout(3000)
+            continue
 
-        if not clicked:
-            # Try keyboard Enter as last resort
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(2000)
+        # Last resort: keyboard Enter
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(2000)
+        try:
             new_body = await page.inner_text("body")
             if new_body != body:
-                clicked = True
+                continue
+        except Exception:
+            pass
 
-        if not clicked:
-            if step == 0:
-                print(f"  → No buttons found on step 1")
-            break
+        if step_num == 0:
+            print(f"  → No buttons found on first step")
+        break
 
-    # Final check for submission
+    # Final submission check
     try:
         final = await page.inner_text("body")
-    except Exception:
-        final = ""
-    for w in ["thank you", "submitted", "Your application"]:
-        if w in final.lower():
+        if any(w in final.lower() for w in ["thank you", "submitted", "Your application"]):
             print(f"  ✅ SUBMITTED!")
             return _success_result()
+    except Exception:
+        pass
 
     print(f"  → WIZARD_END")
-    return _error_result("wizard_end", "Reached end of wizard, no submit button found")
+    return _error_result("wizard_end", "Reached end of wizard")
 
 
 async def _fill_workday_fields(page) -> int:
