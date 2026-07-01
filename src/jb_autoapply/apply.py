@@ -375,11 +375,20 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
             await page.wait_for_timeout(300)
 
             # Try multiple submission strategies
-            overlay = page.locator('[data-automation-id="click_filter"]')
+            overlay = page.locator('[data-automation-id="click_filter"]').first
             if await overlay.is_visible(timeout=300):
                 print(f"  Clicking overlay...")
                 await overlay.click(force=True, timeout=3000)
                 await page.wait_for_timeout(3000)
+            # If still on auth step, try clicking the specific Create Account overlay
+            if await step_email.is_visible(timeout=500):
+                create_overlay = page.locator(
+                    '[data-automation-id="click_filter"][aria-label="Create Account"]'
+                ).first
+                if await create_overlay.is_visible(timeout=300):
+                    print(f"  Clicking Create Account overlay...")
+                    await create_overlay.click(force=True, timeout=5000)
+                    await page.wait_for_timeout(3000)
 
             # Check if still on auth step
             if await step_email.is_visible(timeout=500):
