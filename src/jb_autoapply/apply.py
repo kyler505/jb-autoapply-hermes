@@ -336,9 +336,17 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     #   - A "Sign In" modal/overlay with a different HTML structure
     async def _handle_wizard_auth(page) -> bool:
         """Try to handle a sign-in/auth wizard step. Returns True if advanced past it."""
-        # First check for the standard email field
+        # Find the email field using multiple strategies
         step_email = page.locator('[data-automation-id="email"]')
-        if await step_email.is_visible(timeout=1000):
+        if not await step_email.is_visible(timeout=500):
+            # Fallback: look for email input by type or label
+            step_email = page.locator(
+                'input[type="email"], '
+                'input[name="email"], '
+                'input[data-automation-id*="email"], '
+                'input[aria-label*="Email" i]'
+            ).first
+        if await step_email.is_visible(timeout=2000):
             print(f"  Wizard auth: email field found")
 
             # Check for error text
@@ -350,7 +358,7 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                         return False
 
             await step_email.fill(email)
-            pw_field = page.locator('[data-automation-id="password"]')
+            pw_field = page.locator('[data-automation-id="password"], input[type="password"]').first
             if await pw_field.is_visible(timeout=500):
                 await pw_field.fill(password if password else _accounts.generate_password())
 
@@ -361,51 +369,99 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
 
             await page.wait_for_timeout(300)
 
-            # Click overlay or submit
+            # Try multiple submission strategies
             overlay = page.locator('[data-automation-id="click_filter"]')
             if await overlay.is_visible(timeout=300):
+                print(f"  Clicking overlay...")
                 await overlay.click(force=True, timeout=3000)
-            else:
-                await page.keyboard.press("Enter")
-            await page.wait_for_timeout(4000)
+                await page.wait_for_timeout(3000)
 
-            # Check if still on step 1
-            if await step_email.is_visible(timeout=1000):
+            # Check if still on auth step
+            if await step_email.is_visible(timeout=500):
+                print(f"  Trying Enter key...")
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(3000)
+
+            if await step_email.is_visible(timeout=500):
+                print(f"  Trying submit button directly...")
+                await _remove_overlays(page)
+                # Click any submit-button-looking element
+                submit_btn = page.locator(
+                    '[data-automation-id="createAccountSubmitButton"], '
+                    'button[type="submit"], '
+                    'button:has-text("Create Account")'
+                ).first
+                if await submit_btn.is_visible(timeout=500):
+                    await submit_btn.click(force=True, timeout=5000)
+                    await page.wait_for_timeout(3000)
+                # If still visible, try JavaScript dispatchEvent (React workaround)
+                if await step_email.is_visible(timeout=500):
+                    print(f"  Trying JavaScript click dispatch...")
+                    await page.evaluate("""() => {
+                        const btn = document.querySelector('[data-automation-id="createAccountSubmitButton"]');
+                        if (btn) {
+                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        }
+                    }""")
+                    await page.wait_for_timeout(5000)
+
+            if await step_email.is_visible(timeout=500):
                 body = await page.inner_text("body")
                 if "already exists" in body.lower():
                     print(f"  Account already exists — switching to sign-in mode")
                     await _click_visible_button(page, "Sign In")
                     await page.wait_for_timeout(2000)
                     if password:
-                        await page.locator('[data-automation-id="email"]').fill(email)
-                        await page.locator('[data-automation-id="password"]').fill(password)
-                        await page.keyboard.press("Enter")
-                        await page.wait_for_timeout(4000)
+                        step_email = page.locator('[data-automation-id="email"], input[type="email"]').first
+                        if await step_email.is_visible(timeout=2000):
+                            await step_email.fill(email)
+                            pw_f = page.locator('[data-automation-id="password"], input[type="password"]').first
+                            if await pw_f.is_visible(timeout=500):
+                                await pw_f.fill(password)
+                                await page.keyboard.press("Enter")
+                                await page.wait_for_timeout(4000)
                 else:
-                    # Still stuck — try removing overlay and clicking submit button
-                    await _remove_overlays(page)
-                    await _click(page, '[data-automation-id="createAccountSubmitButton"]', timeout=2000)
-                    await page.wait_for_timeout(3000)
-                    if await step_email.is_visible(timeout=1000):
-                        print(f"  ⚠ Could not advance past wizard auth")
-                        return False
+                    print(f"  ⚠ Could not advance past wizard auth")
+                    return False
             return True
 
-        # Check for Sign In modal/overlay (different structure — common on KLA-style)
+        # Check for Sign In modal/overlay (different structure — common on KLA/TAMU/CVS)
         # Look for heading or button text containing "Sign In"
         try:
             heading = page.locator('h1:has-text("Sign In"), h2:has-text("Sign In"), h3:has-text("Sign In")').first
             if await heading.is_visible(timeout=500):
                 print(f"  Wizard auth: Sign In heading found (alternative layout)")
-                # Find email/password inputs by type
-                email_input = page.locator('input[type="email"]').first
+
+                # Many Workday Sign In pages have "Sign in with email" as a separate button
+                # that reveals the email/password form
+                email_btn = page.locator(
+                    '[data-automation-id="SignInWithEmailButton"], '
+                    'button:has-text("Sign in with email"), '
+                    'button:has-text("Sign in with Email")'
+                ).first
+                if await email_btn.is_visible(timeout=500):
+                    print(f"  Clicking 'Sign in with email' button...")
+                    await email_btn.click(force=True, timeout=5000)
+                    await page.wait_for_timeout(3000)
+
+                # Now look for email input
+                email_input = page.locator(
+                    'input[type="email"], '
+                    '[data-automation-id="email"], '
+                    'input[aria-label*="email" i]'
+                ).first
                 if await email_input.is_visible(timeout=2000):
                     await email_input.fill(email)
-                    pw_input = page.locator('input[type="password"]').first
+                    pw_input = page.locator(
+                        'input[type="password"], '
+                        '[data-automation-id="password"]'
+                    ).first
                     if await pw_input.is_visible(timeout=1000):
                         await pw_input.fill(password if password else _accounts.generate_password())
                         await page.wait_for_timeout(300)
-                        # Click Sign In button
+                        # Try Sign In button
                         await _click_visible_button(page, "Sign In")
                         await page.wait_for_timeout(5000)
                         return True
@@ -562,11 +618,10 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         # Handle review page tasks (agreement, signature)
         await _handle_review_page(page)
 
-        # Fill remaining fields periodically
-        if step_num % 5 == 0:
-            f2 = await _fill_workday_fields(page)
-            if f2 and step_num < 10:
-                print(f"  Filled {f2} remaining field(s) at step {step_num+1}")
+        # Fill remaining fields — do this every iteration to catch validation errors
+        filled_here = await _fill_workday_fields(page)
+        if filled_here and step_num < 10:
+            print(f"  Filled {filled_here} field(s) at step {step_num+1}")
 
         # Try submit buttons first
         clicked = await _click_visible_button(page,
@@ -652,12 +707,26 @@ async def _fill_workday_fields(page) -> int:
         "name--legalName--lastName": "Cao",
         "address--addressLine1": "9810 Orchid Cove Court",
         "address--city": "Cypress",
+        "address--state": "Texas",
         "address--postalCode": "77433",
         "phoneNumber--phoneNumber": "18329664150",
+        "emailAddress--emailAddress": "kcao@tamu.edu",
     }
-    # Multiselect fields: (container automation-id, value to select)
+    # Multiselect fields: (label text to find, value text to select)
     multiselect_fields = [
         ("How Did You Hear About Us?", "Cox Career Site"),
+        ("How Did You Hear About Us", "Cox Career Site"),
+    ]
+    # Radio button questions: (label text containing question, value text to select)
+    radio_questions = [
+        ("have you ever worked", "No"),
+    ]
+    # Combobox/select fields: (label text, value to select)
+    select_fields = [
+        ("state", "Texas"),
+        ("phone device", "Mobile"),
+        ("country", "United States of America"),
+        ("phone country", "United States (+1)"),
     ]
     filled = 0
 
@@ -671,6 +740,67 @@ async def _fill_workday_fields(page) -> int:
                     continue
                 await el.fill(value)
                 filled += 1
+        except Exception:
+            pass
+
+    # Combobox/select via data-automation-id pattern
+    for label_kw, value in select_fields:
+        try:
+            # Find select/combobox elements whose aria-label or nearby label contains the keyword
+            el = page.locator(
+                f'select:near(:text(\"{label_kw}\", i)), '
+                f'[role="combobox"]:near(:text(\"{label_kw}\", i)), '
+                f'input[list]:near(:text(\"{label_kw}\", i)), '
+                f'[data-automation-id*=\"{label_kw}\"]'
+            ).first
+            if await el.is_visible(timeout=200):
+                current = await el.input_value() if hasattr(el, 'input_value') else ""
+                if current and current.strip():
+                    continue
+                # Try native select option
+                try:
+                    await el.select_option(value)
+                    filled += 1
+                    continue
+                except Exception:
+                    pass
+                # Try typing into combobox
+                try:
+                    await el.click()
+                    await page.wait_for_timeout(200)
+                    await el.fill(value)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(300)
+                    filled += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Radio button questions
+    for q_kw, value in radio_questions:
+        try:
+            # Find the radio group by looking for labels containing the question keyword
+            radio_label = page.locator(
+                f'span:has-text(\"{q_kw}\", i), '
+                f'label:has-text(\"{q_kw}\", i), '
+                f'fieldset:has-text(\"{q_kw}\", i) legend'
+            ).first
+            if await radio_label.is_visible(timeout=200):
+                # Find the radio input with matching label
+                radio = page.locator(
+                    f'label:has-text(\"{value}\") input[type=\"radio\"]:near(:text(\"{q_kw}\", i)), '
+                    f'label:has-text(\"{value}\"):near(:text(\"{q_kw}\", i))'
+                ).first
+                if await radio.is_visible(timeout=500):
+                    await radio.click()
+                    filled += 1
+                else:
+                    # Try clicking the label text directly
+                    btn = page.locator(f'label:has-text(\"{value}\"):near(:text(\"{q_kw}\", i))').first
+                    if await btn.is_visible(timeout=200):
+                        await btn.click()
+                        filled += 1
         except Exception:
             pass
 
@@ -705,6 +835,30 @@ async def _fill_workday_fields(page) -> int:
                     filled += 1
         except Exception:
             pass
+
+    # "Select One" dropdowns — Workday comboboxes that default to "Select One"
+    select_one_map = {
+        "State": "Texas",
+        "Phone Device": "Mobile",
+        "Device Type": "Mobile",
+    }
+    try:
+        for label_kw, value in select_one_map.items():
+            # Find a "Select One" button near a label containing the keyword
+            btn = page.locator(
+                f'button:has-text("Select One"):near(:text("{label_kw}", i))'
+            ).first
+            if await btn.is_visible(timeout=100):
+                await btn.click()
+                await page.wait_for_timeout(400)
+                # Select the option
+                opt = page.locator(f'[role="option"]:has-text("{value}")').first
+                if await opt.is_visible(timeout=1500):
+                    await opt.click()
+                    await page.wait_for_timeout(300)
+                    filled += 1
+    except Exception:
+        pass
 
     return filled
 
