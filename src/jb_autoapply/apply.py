@@ -713,6 +713,40 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
                     print(f"  ✓ Filled electronic signature")
                     await page.wait_for_timeout(500)
                     return True
+
+            # Check for embedded Create Account form at the Review step
+            # Some Workday sites (Clio, etc.) embed the Create Account form
+            # at the end of the wizard (step 8/8 Review) instead of upfront.
+            create_email = page.locator(
+                '[data-automation-id="email"], '
+                '[data-automation-id="createAccountUserName"]'
+            ).first
+            if await create_email.is_visible(timeout=300):
+                current = await create_email.input_value()
+                if not current.strip():
+                    await create_email.fill("kcao@tamu.edu")
+                    print(f"  ✓ Filled Create Account email at review step")
+                    pw_field = page.locator(
+                        '[data-automation-id="password"], '
+                        '[data-automation-id="createAccountPassword"]'
+                    ).first
+                    if await pw_field.is_visible(timeout=300):
+                        generated = _accounts.generate_password()
+                        await pw_field.fill(generated)
+                        verify_pw = page.locator(
+                            '[data-automation-id="verifyPassword"], '
+                            '[data-automation-id="createAccountVerifyPassword"]'
+                        ).first
+                        if await verify_pw.is_visible(timeout=300):
+                            await verify_pw.fill(generated)
+                        print(f"  ✓ Filled Create Account password at review step")
+                        # Save the new account immediately
+                        if domain:
+                            _accounts.save_account(domain, "kcao@tamu.edu", generated)
+                            print(f"  ✓ Saved new account for {domain}")
+                        await page.wait_for_timeout(300)
+                        # Don't return True here — let the wizard loop click Submit
+                        # on the next iteration after the form is filled
         except Exception:
             pass
         return False
