@@ -810,9 +810,14 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         # Handle review page tasks (agreement, signature)
         await _handle_review_page(page)
 
+        # Check for email verification wall — account was created but needs email verification
+        resend_btn = page.locator('[data-automation-id="informationalBlurbButton"]:has-text("Resend"), button:has-text("Resend Account Verification")').first
+        if await resend_btn.is_visible(timeout=500):
+            return _error_result("wizard_end", "Email verification required — account created but not verified")
+
         # Fill remaining fields — do this every iteration to catch validation errors
         filled_here = await _fill_workday_fields(page)
-        if filled_here and step_num < 10:
+        if filled_here:
             print(f"  Filled {filled_here} field(s) at step {step_num+1}")
 
         # Try submit buttons first
@@ -899,15 +904,14 @@ async def _fill_workday_fields(page) -> int:
         "name--legalName--lastName": "Cao",
         "address--addressLine1": "9810 Orchid Cove Court",
         "address--city": "Cypress",
-        "address--state": "Texas",
         "address--postalCode": "77433",
         "phoneNumber--phoneNumber": "18329664150",
         "emailAddress--emailAddress": "kcao@tamu.edu",
     }
     # Multiselect fields: (label text to find, value text to select)
     multiselect_fields = [
-        ("How Did You Hear About Us?", "Cox Career Site"),
-        ("How Did You Hear About Us", "Cox Career Site"),
+        ("How Did You Hear About Us?", "LinkedIn"),
+        ("How Did You Hear About Us", "LinkedIn"),
     ]
     # Radio button questions: (label text containing question, value text to select)
     radio_questions = [
@@ -999,80 +1003,116 @@ async def _fill_workday_fields(page) -> int:
         except Exception:
             pass
 
-    # Multiselect/combobox fields — click to open, then select option
+    # Multiselect/combobox fields — single comprehensive approach
     for label, option_text in multiselect_fields:
         try:
-            # Find the visible multiselect container by looking for the label text
-            # then clicking its sibling input container
-            label_el = page.locator(f'label:has-text("{label}"), span:has-text("{label}")').first
-            if not await label_el.is_visible(timeout=200):
-                continue
-
-            # Find the parent field container, then the multiselect div
-            field_group = label_el.locator('xpath=ancestor::div[contains(@data-automation-id, "formField")]')
-            multiselect = field_group.locator('[data-automation-id="multiselectInputContainer"]')
-
-            if await multiselect.is_visible(timeout=500):
-                # Check if already has a selection (text shows "1 item selected" not "0 items selected")
-                text = await multiselect.inner_text()
+            # Try clicking the multiselect container to open dropdown (simple dropdown variant)
+            container = page.locator('[data-automation-id="multiselectInputContainer"]').first
+            if await container.is_visible(timeout=300):
+                text = await container.inner_text()
                 if "0 items selected" not in text:
-                    continue  # Already filled
-
-                # Click to open the dropdown
-                await multiselect.click()
-                await page.wait_for_timeout(500)
-
-                # Click the option with matching text
-                option = page.locator(f'[role="option"]:has-text("{option_text}")').first
-                if await option.is_visible(timeout=2000):
-                    await option.click()
+                    continue
+                await container.click()
+                await page.wait_for_timeout(600)
+                # Try selecting option directly from the opened dropdown
+                opt = page.locator(f'[role="option"]:has-text("{option_text}")').first
+                if await opt.is_visible(timeout=2000):
+                    await opt.click()
                     await page.wait_for_timeout(300)
                     filled += 1
+                    continue
         except Exception:
             pass
 
-    # "Select One" dropdowns — Workday comboboxes that default to "Select One"
-    select_one_map = {
-        "State": "Texas",
-        "Phone Device": "Mobile",
-        "Device Type": "Mobile",
-        "Country": "United States of America",
-        "Phone Country": "United States (+1)",
-    }
-    try:
-        for label_kw, value in select_one_map.items():
-            # Find a "Select One" button near a label containing the keyword
-            btn = page.locator(
-                f'button:has-text("Select One"):near(:text("{label_kw}", i)), '
-                f'button:has-text("-- Select --"):near(:text("{label_kw}", i))'
-            ).first
-            if await btn.is_visible(timeout=100):
-                await btn.click()
-                await page.wait_for_timeout(400)
-                # Select the option — try multiple strategies
-                opt = page.locator(
-                    f'[role="option"]:has-text("{value}"), '
-                    f'li:has-text("{value}"), '
-                    f'div[role="listbox"] :text-is("{value}")'
-                ).first
+    for label, option_text in multiselect_fields:
+        try:
+            if filled >= 7:
+                continue
+            # Try keyboard-driven approach for search-hierarchy variant
+            # Click the search input, type slowly, press Enter
+            search = page.locator('#source--source').first
+            if await search.is_visible(timeout=200):
+                current = await search.input_value()
+                if current and current.strip():
+                    continue
+                await search.click()
+                await page.wait_for_timeout(300)
+                # Type each character with delay to trigger React onChange
+                for ch in "LinkedIn":
+                    await page.keyboard.press(ch)
+                    await page.wait_for_timeout(50)
+                await page.wait_for_timeout(1000)
+                # Try clicking any visible option
+                opt = page.locator('[role="option"]').first
                 if await opt.is_visible(timeout=1500):
                     await opt.click()
                     await page.wait_for_timeout(300)
                     filled += 1
                     continue
-                # Fallback: type in the search field and press Enter
-                search = page.locator(
-                    f'input[role="combobox"]:near(:text("{label_kw}", i)), '
-                    f'input[type="text"]:near(:text("{label_kw}", i))'
-                ).first
-                if await search.is_visible(timeout=300):
-                    await search.fill(value)
+                # Try pressing Enter as last resort
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(500)
+                filled += 1
+        except Exception:
+            pass
+
+    for label, option_text in multiselect_fields:
+        try:
+            if filled >= 7:  # already filled
+                continue
+            # Strategy C: JavaScript fallback — set the hidden input directly
+            await page.evaluate("""
+                (() => {
+                    const inputs = document.querySelectorAll('input[type="hidden"]');
+                    for (const inp of inputs) {
+                        if (inp.value === '' || inp.value === '[]') {
+                            // Find parent multiselect
+                            const container = inp.closest('[data-automation-id="multiselectContainer"]');
+                            if (container) {
+                                inp.value = 'LinkedIn';
+                                inp.dispatchEvent(new Event('change', {bubbles: true}));
+                                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                            }
+                        }
+                    }
+                })()
+            """)
+            await page.wait_for_timeout(300)
+            filled += 1
+        except Exception:
+            pass
+
+    # "Select One" dropdowns — Workday comboboxes that default to "Select One"
+    # Brute force: find ALL "Select One" buttons and try each one with our known value pairs
+    # This is more reliable than trying to find the right button by label proximity
+    select_one_pairs = [
+        ("Texas", "Texas"),
+        ("Mobile", "Mobile"),
+        ("United States of America", "United States of America"),
+        ("United States (+1)", "United States (+1)"),
+    ]
+    for select_kw, value in select_one_pairs:
+        try:
+            # Find ALL Select One buttons visible on the page
+            buttons = page.locator('button:has-text("Select One"), button:has-text("-- Select --")')
+            count = await buttons.count()
+            for i in range(count):
+                btn = buttons.nth(i)
+                if not await btn.is_visible(timeout=50):
+                    continue
+                await btn.click()
+                await page.wait_for_timeout(400)
+                opt = page.locator(f'[role="option"]:has-text("{value}"), li:has-text("{value}")').first
+                if await opt.is_visible(timeout=800):
+                    await opt.click()
                     await page.wait_for_timeout(300)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_timeout(500)
                     filled += 1
-    except Exception:
-        pass
+                    break  # Found and selected, move to next pair
+                # Not this button — click elsewhere to close dropdown
+                await btn.press("Escape")
+                await page.wait_for_timeout(200)
+        except Exception:
+            pass
 
     return filled
 
