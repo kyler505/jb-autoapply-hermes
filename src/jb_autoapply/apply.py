@@ -1003,79 +1003,31 @@ async def _fill_workday_fields(page) -> int:
         except Exception:
             pass
 
-    # Multiselect/combobox fields — single comprehensive approach
+    # Multiselect combobox — click container, don't type at all
+    # Workday's multiselect shows all categories when opened, no search needed
     for label, option_text in multiselect_fields:
         try:
-            # Try clicking the multiselect container to open dropdown (simple dropdown variant)
+            # Click the multiselect container to open the full dropdown
             container = page.locator('[data-automation-id="multiselectInputContainer"]').first
             if await container.is_visible(timeout=300):
                 text = await container.inner_text()
                 if "0 items selected" not in text:
                     continue
                 await container.click()
-                await page.wait_for_timeout(600)
-                # Try selecting option directly from the opened dropdown
-                opt = page.locator(f'[role="option"]:has-text("{option_text}")').first
-                if await opt.is_visible(timeout=2000):
+                await page.wait_for_timeout(800)
+                # Look for ANY option containing "Linkedin" (case-insensitive)
+                opt = page.locator('[role="option"]:has-text("Linkedin"), [role="option"]:has-text("linkedin")').first
+                if await opt.is_visible(timeout=1500):
                     await opt.click()
                     await page.wait_for_timeout(300)
                     filled += 1
                     continue
-        except Exception:
-            pass
-
-    for label, option_text in multiselect_fields:
-        try:
-            if filled >= 7:
-                continue
-            # Use pressSequentially which dispatches proper keyboard events React needs
-            search = page.locator('#source--source').first
-            if await search.is_visible(timeout=200):
-                current = await search.input_value()
-                if current and current.strip():
-                    continue
-                await search.click()
-                await page.wait_for_timeout(300)
-                # pressSequentially dispatches keydown→input→keyup per char — React listens for this
-                await search.press_sequentially("LinkedIn", delay=80)
-                await page.wait_for_timeout(1500)
-                # Try clicking any visible option
-                opt = page.locator('[role="option"]').first
-                if await opt.is_visible(timeout=2000):
-                    await opt.click()
+                # If no Linkedin option, try clicking the first visible option
+                first_opt = page.locator('[role="option"]').first
+                if await first_opt.is_visible(timeout=800):
+                    await first_opt.click()
                     await page.wait_for_timeout(300)
                     filled += 1
-                    continue
-                # Fallback: press Enter to submit typed value
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(500)
-                filled += 1
-        except Exception:
-            pass
-
-    for label, option_text in multiselect_fields:
-        try:
-            if filled >= 7:  # already filled
-                continue
-            # Strategy C: JavaScript fallback — set the hidden input directly
-            await page.evaluate("""
-                (() => {
-                    const inputs = document.querySelectorAll('input[type="hidden"]');
-                    for (const inp of inputs) {
-                        if (inp.value === '' || inp.value === '[]') {
-                            // Find parent multiselect
-                            const container = inp.closest('[data-automation-id="multiselectContainer"]');
-                            if (container) {
-                                inp.value = 'LinkedIn';
-                                inp.dispatchEvent(new Event('change', {bubbles: true}));
-                                inp.dispatchEvent(new Event('input', {bubbles: true}));
-                            }
-                        }
-                    }
-                })()
-            """)
-            await page.wait_for_timeout(300)
-            filled += 1
         except Exception:
             pass
 
