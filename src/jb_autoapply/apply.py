@@ -1028,8 +1028,7 @@ async def _fill_workday_fields(page) -> int:
         try:
             if filled >= 7:
                 continue
-            # Try keyboard-driven approach for search-hierarchy variant
-            # Click the search input, type slowly, press Enter
+            # Use pressSequentially which dispatches proper keyboard events React needs
             search = page.locator('#source--source').first
             if await search.is_visible(timeout=200):
                 current = await search.input_value()
@@ -1037,19 +1036,17 @@ async def _fill_workday_fields(page) -> int:
                     continue
                 await search.click()
                 await page.wait_for_timeout(300)
-                # Type each character with delay to trigger React onChange
-                for ch in "LinkedIn":
-                    await page.keyboard.press(ch)
-                    await page.wait_for_timeout(50)
-                await page.wait_for_timeout(1000)
+                # pressSequentially dispatches keydown→input→keyup per char — React listens for this
+                await search.press_sequentially("LinkedIn", delay=80)
+                await page.wait_for_timeout(1500)
                 # Try clicking any visible option
                 opt = page.locator('[role="option"]').first
-                if await opt.is_visible(timeout=1500):
+                if await opt.is_visible(timeout=2000):
                     await opt.click()
                     await page.wait_for_timeout(300)
                     filled += 1
                     continue
-                # Try pressing Enter as last resort
+                # Fallback: press Enter to submit typed value
                 await page.keyboard.press("Enter")
                 await page.wait_for_timeout(500)
                 filled += 1
