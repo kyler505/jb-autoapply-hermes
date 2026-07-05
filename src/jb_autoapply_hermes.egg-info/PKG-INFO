@@ -5,6 +5,8 @@ Summary: Hermes-native job application pipeline using the jb vault as source
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: PyYAML>=6.0
+Requires-Dist: beautifulsoup4>=4.12
+Requires-Dist: requests>=2.31
 Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Provides-Extra: nopecha

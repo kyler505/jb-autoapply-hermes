@@ -1442,9 +1442,16 @@ def _ats_name(site: str) -> str:
 class ApplyRunner:
     """Orchestrates the apply pipeline for a queue of jobs."""
 
-    def __init__(self, *, dry_run: bool = False, limit: int | None = None):
+    def __init__(
+        self,
+        *,
+        dry_run: bool = False,
+        limit: int | None = None,
+        review: bool = False,
+    ):
         self.dry_run = dry_run
         self.limit = limit
+        self.review = review
         self.rate_tracker = RateTracker()
         self.results: list[dict[str, Any]] = []
         self.verified: list[dict[str, Any]] = []
@@ -1485,6 +1492,51 @@ class ApplyRunner:
 
         return self.evaluations
 
+    def _review_queue(self, queue: list[dict[str, Any]]) -> None:
+        """Generate drafter-reviewer prompts for competitive roles.
+
+        For each job in the queue where the role looks competitive
+        (AI/ML/data-science/senior), generates initial draft answers
+        and builds a reviewer prompt. Prints prompts the agent can
+        delegate to subagents for company research and answer revision.
+
+        The actual subagent delegation happens outside this module,
+        invoked by the Hermes agent in response to the printed prompts.
+        """
+        from .review import review_answers, format_reviewer_prompt
+
+        print(f"\n{'DRAFTER-REVIEWER PASS':=^60}")
+
+        # Sample questions that commonly appear in application forms
+        common_questions = [
+            "Why do you want to work here?",
+            "Tell me about yourself and your experience",
+            "What are your career goals?",
+            "Describe a challenging project you worked on",
+        ]
+
+        competitive_count = 0
+        for job in queue:
+            url = job.get("url", "")
+            company = job.get("company", "?")
+            role = job.get("role", "?")
+
+            # Only review competitive roles (AI/ML/data science focused)
+            context = review_answers(company, role, url, common_questions)
+            if not context.is_competitive:
+                continue
+
+            competitive_count += 1
+            prompt = format_reviewer_prompt(context)
+            print(f"\n[{competitive_count}] {company} — {role}")
+            print(f"    URL: {url}")
+            print(f"    Reviewer prompt ready (delegate to subagent with toolsets=['web'])")
+
+        print(f"\n{'=' * 60}")
+        print(f"Review prompts generated for {competitive_count} competitive role(s).")
+        print("(Agent: delegate each prompt to a subagent with toolsets=['web'])")
+        print(f"{'=' * 60}")
+
     async def run(self, *, evaluate: int = 0) -> int:
         """Run the pipeline. Returns exit code (0 = all ok)."""
         queue = build_queue()
@@ -1496,6 +1548,12 @@ class ApplyRunner:
             return 0
 
         print(f"Queue: {len(queue)} jobs")
+
+        # Optional review pass: generate drafter-reviewer prompts for competitive roles
+        if self.review:
+            print(f"\n--- Review Pass: generating drafter-reviewer prompts ---")
+            self._review_queue(queue)
+            print(f"--- Review pass complete ---\n")
 
         # Optional evaluation pass: score top N jobs with 5-dimension framework
         if evaluate > 0:
@@ -1775,6 +1833,7 @@ def apply_queue(
     dry_run: bool = False,
     limit: int | None = None,
     evaluate: int = 0,
+    review: bool = False,
 ) -> int:
     """Run the apply pipeline (synchronous entry point called from cli.py).
 
@@ -1783,8 +1842,9 @@ def apply_queue(
         limit: Max jobs to process.
         evaluate: If > 0, score the top N queue jobs with the 5-dimension
             evaluation framework before processing (subagents per job).
+        review: If True, run the drafter-reviewer pass on competitive roles.
     """
-    runner = ApplyRunner(dry_run=dry_run, limit=limit)
+    runner = ApplyRunner(dry_run=dry_run, limit=limit, review=review)
     return asyncio.run(runner.run(evaluate=evaluate))
 
 
@@ -1793,3 +1853,22 @@ def evaluate_queue_prompt(company: str, role: str, url: str) -> str:
     delegate evaluation to a subagent before running the pipeline."""
     from .evaluate import format_evaluation_prompt
     return format_evaluation_prompt(company, role, url)
+
+
+def review_queue_prompt(company: str, role: str, url: str) -> str:
+    """Generate the drafter-reviewer prompt for a single job. Used by the agent
+    to delegate review to a subagent with toolsets=['web'].
+
+    Returns the full reviewer prompt string that includes initial drafts,
+    profile context, and instructions for researching the company.
+    """
+    from .review import review_answers, format_reviewer_prompt
+
+    common_questions = [
+        "Why do you want to work here?",
+        "Tell me about yourself and your experience",
+        "What are your career goals?",
+        "Describe a challenging project you worked on",
+    ]
+    context = review_answers(company, role, url, common_questions)
+    return format_reviewer_prompt(context)

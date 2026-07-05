@@ -1,4 +1,6 @@
 PyYAML>=6.0
+beautifulsoup4>=4.12
+requests>=2.31
 
 [dev]
 pytest>=8

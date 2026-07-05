@@ -14,6 +14,7 @@ from .prepare import prepare_queue
 from .profile_data import load_profile, load_targeting
 from . import simplify as _simplify
 from . import accounts as _accounts
+from . import linkedin as _linkedin
 from .selector import build_queue
 
 
@@ -201,8 +202,26 @@ def _accounts_verify() -> int:
     return 0 if all(r["valid"] for r in results) else 1
 
 
-def _apply(limit: int | None = None, dry_run: bool = False, evaluate: int = 0) -> int:
-    return apply_queue(limit=limit, dry_run=dry_run, evaluate=evaluate)
+def _apply(limit: int | None = None, dry_run: bool = False, evaluate: int = 0, review: bool = False) -> int:
+    return apply_queue(limit=limit, dry_run=dry_run, evaluate=evaluate, review=review)
+
+
+def _linkedin_search(
+    keyword: str,
+    location: str = "",
+    limit: int = 10,
+    details: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Search LinkedIn jobs via the public guest API."""
+    jobs = _linkedin.cli_search(
+        keyword=keyword,
+        location=location,
+        limit=limit,
+        details=details,
+        json_output=json_output,
+    )
+    return 0 if jobs else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,6 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     p_apply.add_argument('--dry-run', action='store_true', help='Preview what would happen without actually submitting')
     p_apply.add_argument('--evaluate', type=int, default=0, metavar='N',
                          help='Score top N jobs with 5-dimension evaluation framework before processing')
+    p_apply.add_argument('--review', action='store_true', default=False,
+                         help='Run drafter-reviewer on competitive roles before applying')
+
+    p_li = sub.add_parser('linkedin-search', help='Search LinkedIn jobs via the public guest API')
+    p_li.add_argument('--keyword', required=True, help='Job search keyword (e.g. "software engineer intern")')
+    p_li.add_argument('--location', default='', help='Location (e.g. "Austin, TX")')
+    p_li.add_argument('--limit', type=int, default=10, help='Max results to return (default: 10)')
+    p_li.add_argument('--details', action='store_true', help='Fetch full job details (descriptions)')
+    p_li.add_argument('--json', action='store_true', dest='json_output', help='Output as JSON')
 
     args = ap.parse_args(argv)
     if args.cmd == 'doctor':
@@ -300,7 +328,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'accounts-verify':
         return _accounts_verify()
     if args.cmd == 'apply':
-        return _apply(limit=args.limit, dry_run=args.dry_run, evaluate=args.evaluate)
+        return _apply(limit=args.limit, dry_run=args.dry_run, evaluate=args.evaluate, review=args.review)
+    if args.cmd == 'linkedin-search':
+        return _linkedin_search(
+            keyword=args.keyword,
+            location=args.location,
+            limit=args.limit,
+            details=args.details,
+            json_output=args.json_output,
+        )
     return 1
 
 
