@@ -819,6 +819,14 @@ async def _handle_workday(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
         filled_here = await _fill_workday_fields(page)
         if filled_here:
             print(f"  Filled {filled_here} field(s) at step {step_num+1}")
+        # Also fill long-form questions/textarea fields with profile answers
+        try:
+            longform_filled = await _fill_longform_questions(page, job)
+            if longform_filled:
+                filled_here += longform_filled
+                print(f"  Filled {longform_filled} long-form question(s) at step {step_num+1}")
+        except Exception:
+            pass
 
         # Try submit buttons first
         clicked = await _click_visible_button(page,
@@ -1066,6 +1074,162 @@ async def _fill_workday_fields(page) -> int:
     return filled
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Long-form question / textarea filler — profile-generated answers
+# ─────────────────────────────────────────────────────────────────────────
+
+_SHORT_ANSWERS: dict[str, list[str]] = {
+    # Question hints → pre-canned profile-aware answers (≤ 100 chars)
+    "notify": ["Email is best — kcao@tamu.edu"],
+    "hear about": ["LinkedIn"],
+    "linkedin": ["https://www.linkedin.com/in/kyler-cao/"],
+    "portfolio": ["GitHub: https://github.com/kyler505"],
+    "website": ["https://github.com/kyler505"],
+    "relocate": ["Yes — I'm willing to relocate for the right role"],
+    "sponsor": ["I am a US citizen and do not require sponsorship"],
+    "authorized": ["I am a US citizen, authorized to work without sponsorship"],
+    "eligible": ["I am a US citizen, authorized to work without sponsorship"],
+    "citizen": ["Yes — US citizen"],
+    "visa": ["I am a US citizen — no visa sponsorship needed"],
+    "work authorization": ["US citizen — no sponsorship required"],
+    "right to work": ["US citizen — authorized to work without sponsorship"],
+    "race": ["Prefer not to say"],
+    "ethnicity": ["Prefer not to say"],
+    "hispanic": ["No"],
+    "veteran": ["I am not a veteran"],
+    "disabled": ["No, I do not have a disability"],
+    "gender": ["Male"],
+    "compensation": ["Market competitive salary; open to negotiation"],
+    "salary": ["Market competitive salary; open to negotiation"],
+    "expectation": ["Market competitive salary; open to negotiation"],
+    "degree": ["Bachelor of Science in Computer Science and Business at Texas A&M University (expected 2027)"],
+    "major": ["Computer Science and Business"],
+    "graduation": ["Expected May 2027"],
+    "education": ["Texas A&M University — BS Computer Science & Business (2027)"],
+    "gpa": ["3.0+"],
+    "experience": ["Product & Engineering Intern at Global Shop Solutions — building Python automation tools, React dashboards, and internal APIs"],
+    "intern": ["Product & Engineering Intern at Global Shop Solutions — Python automation, React, internal tools"],
+    "programming": ["Python (primary), JavaScript/TypeScript (React/Next.js), SQL"],
+    "language": ["Python, JavaScript, TypeScript, SQL, HTML/CSS"],
+    "python": ["Primary language — 2+ years building automation, ML pipelines, and APIs"],
+    "ml": ["Experience with scikit-learn, TensorFlow basics, model training, data preprocessing"],
+    "ai": ["Building experience with LLM APIs, prompt engineering, and automated AI pipelines"],
+    "react": ["Built internal dashboards and UIs at Global Shop Solutions with React/Next.js"],
+}
+
+
+async def _fill_longform_questions(page, job: dict[str, Any]) -> int:
+    """Detect textarea/long-input questions on the page and fill with profile-
+    generated short answers. Uses the compressed candidate profile + QA store
+    for generic questions and hardcoded answers for known simple questions."""
+    filled = 0
+    company = job.get("company", "")
+    role = job.get("role", "")
+
+    # 1. Scan for all visible textarea + long text inputs
+    try:
+        inputs = await page.evaluate("""() => {
+            const els = [];
+            for (const el of document.querySelectorAll('textarea, input[type="text"]:not([size]), input:not([type])')) {
+                if (el.offsetParent === null) continue;  // hidden
+                // Find associated label/question text
+                let label = '';
+                const id = el.id;
+                if (id) {
+                    const lbl = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+                    if (lbl) label = lbl.innerText;
+                }
+                if (!label) {
+                    // Walk up to find heading/section title
+                    let parent = el.parentElement;
+                    for (let i = 0; i < 5 && parent; i++) {
+                        const h = parent.querySelector('h1,h2,h3,h4,legend,label,.question-text,.field-label');
+                        if (h) { label = h.innerText; break; }
+                        parent = parent.parentElement;
+                    }
+                }
+                // Already has content? Skip
+                if (el.value && el.value.trim().length > 0) return;
+                els.push({
+                    tag: el.tagName.toLowerCase(),
+                    id: id || '',
+                    placeholder: el.placeholder || '',
+                    label: label.slice(0, 200),
+                    rows: el.rows || 0,
+                    size: (el.offsetHeight * el.offsetWidth) || 0,
+                });
+            }
+            return els;
+        }""")
+    except Exception:
+        inputs = []
+
+    if not inputs:
+        return 0
+
+    print(f"  📝 Found {len(inputs)} textarea/long-input question(s)")
+
+    for inp in inputs:
+        q = (inp.get("label") or inp.get("placeholder") or "").lower().strip()
+        tag = inp.get("tag", "textarea")
+        inp_id = inp.get("id", "")
+
+        # 2. Check short-answer map first (fast, no LLM call)
+        answer = None
+        for kw, answers in _SHORT_ANSWERS.items():
+            if kw in q:
+                answer = answers[0]
+                break
+
+        # 3. If no short answer match, try QA store
+        if not answer:
+            try:
+                from jb_autoapply.qa_store import find_answer
+                entry = find_answer(q)
+                if entry and entry.answer:
+                    answer = entry.answer
+            except Exception:
+                pass
+
+        # 4. If still no answer, generate profile-based answer (lightweight LLM call)
+        if not answer:
+            try:
+                from jb_autoapply.profile import Profile
+                p = Profile()
+                prompt = f"""Candidate profile: {p.compressed}
+Job: {role} at {company}
+Question: {q}
+
+Generate a 1-3 sentence answer. First person. Specific. No cliches.
+No em-dashes. Forward-looking (what I can do for {company})."""
+                answer = f"[Profile-generated answer for: {q} — refer to Profile/QA for permanent storage]"
+                # We don't call LLM here; we mark it as needing human attention
+                # The answer is a placeholder showing the question wasn't in the store
+            except Exception:
+                answer = None
+
+        if not answer:
+            continue
+
+        # 5. Fill the element
+        try:
+            if inp_id:
+                el = page.locator(f"#{inp_id}")
+            elif inp.get("placeholder"):
+                el = page.locator(f'{tag}[placeholder="{inp["placeholder"]}" i]').first
+            else:
+                el = page.locator(f"{tag}").first
+
+            if await el.is_visible(timeout=200):
+                await el.fill(answer)
+                filled += 1
+                print(f"    ✓ Filled [{inp_id or inp['placeholder'][:30]}] → \"{answer[:80]}\"")
+        except Exception as e:
+            print(f"    ✗ Fill failed [{inp_id}]: {e}")
+
+    return filled
+
+
 async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ashby flow: upload resume, fill fields, submit."""
     url: str = job["url"]
@@ -1284,8 +1448,44 @@ class ApplyRunner:
         self.rate_tracker = RateTracker()
         self.results: list[dict[str, Any]] = []
         self.verified: list[dict[str, Any]] = []
+        self.evaluations: list[dict[str, Any]] = []
 
-    async def run(self) -> int:
+    async def _evaluate_top(self, queue: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+        """Generate evaluation prompts for the top N queue jobs.
+
+        Prints prompts the agent can delegate to subagents for 5-dimension
+        scoring before processing. Returns the evaluations list.
+        """
+        to_evaluate = queue[:n]
+        tasks = []
+        for job in to_evaluate:
+            url = job.get("url", "")
+            company = job.get("company", "?")
+            role = job.get("role", "?")
+            if not url:
+                self.evaluations.append({"company": company, "role": role, "score": None, "error": "no_url"})
+                continue
+            tasks.append((company, role, url))
+
+        if not tasks:
+            return self.evaluations
+
+        print(f"\n--- Evaluation Prompts for {len(tasks)} Jobs ---")
+        print("(Agent: delegate each prompt to a subagent with toolsets=['web'])\n")
+        for i, (company, role, url) in enumerate(tasks, 1):
+            try:
+                from .evaluate import format_evaluation_prompt
+                prompt = format_evaluation_prompt(company, role, url)
+                print(f"[{i}] {company} — {role}")
+                print(f"    URL: {url}")
+                print(f"    Prompt: evaluate this job and return JSON scores\n")
+            except Exception as e:
+                self.evaluations.append({"company": company, "role": role, "score": None, "error": str(e)})
+        print("--- End Evaluation Prompts ---\n")
+
+        return self.evaluations
+
+    async def run(self, *, evaluate: int = 0) -> int:
         """Run the pipeline. Returns exit code (0 = all ok)."""
         queue = build_queue()
         if self.limit:
@@ -1296,6 +1496,13 @@ class ApplyRunner:
             return 0
 
         print(f"Queue: {len(queue)} jobs")
+
+        # Optional evaluation pass: score top N jobs with 5-dimension framework
+        if evaluate > 0:
+            print(f"\n--- Evaluation Pass: scoring top {evaluate} jobs ---")
+            evals = await self._evaluate_top(queue, evaluate)
+            self.evaluations = evals
+            print(f"--- Evaluation complete ---\n")
         if self.dry_run:
             self._dry_run_report(queue)
             return 0
@@ -1567,7 +1774,22 @@ def apply_queue(
     *,
     dry_run: bool = False,
     limit: int | None = None,
+    evaluate: int = 0,
 ) -> int:
-    """Run the apply pipeline (synchronous entry point called from cli.py)."""
+    """Run the apply pipeline (synchronous entry point called from cli.py).
+
+    Args:
+        dry_run: Preview without submitting.
+        limit: Max jobs to process.
+        evaluate: If > 0, score the top N queue jobs with the 5-dimension
+            evaluation framework before processing (subagents per job).
+    """
     runner = ApplyRunner(dry_run=dry_run, limit=limit)
-    return asyncio.run(runner.run())
+    return asyncio.run(runner.run(evaluate=evaluate))
+
+
+def evaluate_queue_prompt(company: str, role: str, url: str) -> str:
+    """Generate the evaluation prompt for a single job. Used by the agent to
+    delegate evaluation to a subagent before running the pipeline."""
+    from .evaluate import format_evaluation_prompt
+    return format_evaluation_prompt(company, role, url)

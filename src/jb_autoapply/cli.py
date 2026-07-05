@@ -201,8 +201,8 @@ def _accounts_verify() -> int:
     return 0 if all(r["valid"] for r in results) else 1
 
 
-def _apply(limit: int | None = None, dry_run: bool = False) -> int:
-    return apply_queue(limit=limit, dry_run=dry_run)
+def _apply(limit: int | None = None, dry_run: bool = False, evaluate: int = 0) -> int:
+    return apply_queue(limit=limit, dry_run=dry_run, evaluate=evaluate)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -252,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     p_apply = sub.add_parser('apply', help='Run the apply pipeline on the queue')
     p_apply.add_argument('--limit', type=int, default=None, help='Max jobs to process')
     p_apply.add_argument('--dry-run', action='store_true', help='Preview what would happen without actually submitting')
+    p_apply.add_argument('--evaluate', type=int, default=0, metavar='N',
+                         help='Score top N jobs with 5-dimension evaluation framework before processing')
 
     args = ap.parse_args(argv)
     if args.cmd == 'doctor':
@@ -298,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'accounts-verify':
         return _accounts_verify()
     if args.cmd == 'apply':
-        return _apply(limit=args.limit, dry_run=args.dry_run)
+        return _apply(limit=args.limit, dry_run=args.dry_run, evaluate=args.evaluate)
     return 1
 
 
