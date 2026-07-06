@@ -1346,11 +1346,11 @@ async def _click_submit_flow(page) -> dict[str, Any]:
         body = ""
     for word in ["thank you", "submitted", "Your application", "application has been submitted"]:
         if word in body.lower():
-            print(f"  ✅ SUBMITTED!")
-            return _success_result()
+            print(f"  ✅ SUBMITTED! (confirmation text found on page)")
+            return _success_result(confirmation="page_text")
 
-    print(f"  → Applied (submit clicked, awaiting confirmation)")
-    return _success_result(method="simplify", status="applied")
+    print(f"  → Submit clicked — confirmation not detected on page")
+    return _success_result(method="simplify", status="pending", confirmation=None)
 
 
 # ---------------------------------------------------------------------------
