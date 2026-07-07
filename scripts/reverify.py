@@ -20,9 +20,10 @@ NDIR = str(Path.home() / ".nopecha" / "chromium")
 PROFILE = "/tmp/autoapply-reverify"
 
 
-def list_applied_jobs(date_filter: str | None = None) -> list[dict]:
+def list_applied_jobs(date_filter: str | None = None, include_pending: bool = False) -> list[dict]:
     """
     Scan the vault and return all jobs marked `status: applied`.
+    If include_pending is True, also include `status: pending`.
     If date_filter is given, only return jobs with `applied_date` matching.
     """
     vdir = Path.home() / "Obsidian" / "jb" / "Jobs"
@@ -41,8 +42,12 @@ def list_applied_jobs(date_filter: str | None = None) -> list[dict]:
                     fm[k.strip()] = v.strip()
 
             status = fm.get("status", "").strip()
-            if status != "applied":
-                continue
+            if include_pending:
+                if status not in ("applied", "pending"):
+                    continue
+            else:
+                if status != "applied":
+                    continue
 
             applied_date = fm.get("applied_date", "").strip()
             if date_filter and applied_date != date_filter:
@@ -165,6 +170,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Mass reverify job applications")
     parser.add_argument("date", nargs="?", default=None, help="Date filter (default: today)")
     parser.add_argument("--all", action="store_true", help="Reverify ALL applied jobs")
+    parser.add_argument("--pending", action="store_true", help="Also reverify pending jobs (submit clicked, no in-session conf)")
     args = parser.parse_args()
 
     if args.all:
@@ -174,7 +180,7 @@ async def main():
     else:
         date_filter = datetime.now().strftime("%Y-%m-%d")
 
-    jobs = list_applied_jobs(date_filter)
+    jobs = list_applied_jobs(date_filter, include_pending=args.pending)
     if not jobs:
         print(f"No applied jobs found{' for ' + date_filter if date_filter else ''}")
         return 0
