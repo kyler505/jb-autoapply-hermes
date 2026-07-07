@@ -1777,25 +1777,41 @@ class ApplyRunner:
 
                 if confirmed:
                     print(f"    ✅ CONFIRMED — application went through")
+                    # Upgrade vault from pending/whatever to applied
+                    for job in queue:
+                        jurl = job.get("url", "")
+                        if jurl == url or url in jurl:
+                            from .vault import read_note, set_fm_field, write_note
+                            path_obj = Path(job["path"])
+                            try:
+                                _, fm_text, body_text = read_note(path_obj)
+                                fm_text = set_fm_field(fm_text, "status", "applied")
+                                fm_text = set_fm_field(fm_text, "apply_result", "confirmed")
+                                write_note(path_obj, fm_text, body_text)
+                            except Exception as exc:
+                                print(f"      ⚠ Failed to confirm vault: {exc}")
+                            break
                 else:
                     print(f"    ❌ NOT CONFIRMED — reverting vault status")
                     # Revert the vault note: set status back to 'to-apply'
                     result["status"] = "to-apply"
                     result["result"] = "not_confirmed"
                     result["applied_date"] = None
-                    # Find matching job in queue and write back
+                    # Write back directly through the job's vault path (reliable)
                     for job in queue:
-                        if job.get("url") == url or (
-                            job.get("company", "").lower() == company.lower()
-                        ):
+                        jurl = job.get("url", "")
+                        if jurl == url or url in jurl:
                             from .vault import read_note, set_fm_field, write_note
                             path_obj = Path(job["path"])
-                            _, fm_text, body_text = read_note(path_obj)
-                            fm_text = set_fm_field(fm_text, "status", "to-apply")
-                            fm_text = set_fm_field(fm_text, "applied_date", None)
-                            fm_text = set_fm_field(fm_text, "apply_result", "not_confirmed")
-                            write_note(path_obj, fm_text, body_text)
-                            print(f"      Reverted {job.get('company', '?')} in vault")
+                            try:
+                                _, fm_text, body_text = read_note(path_obj)
+                                fm_text = set_fm_field(fm_text, "status", "to-apply")
+                                fm_text = set_fm_field(fm_text, "applied_date", None)
+                                fm_text = set_fm_field(fm_text, "apply_result", "not_confirmed")
+                                write_note(path_obj, fm_text, body_text)
+                                print(f"      Reverted {job.get('company', '?')} in vault")
+                            except Exception as exc:
+                                print(f"      ⚠ Failed to revert vault: {exc}")
                             break
 
             except Exception as exc:
