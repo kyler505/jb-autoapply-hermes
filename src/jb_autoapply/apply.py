@@ -1253,7 +1253,7 @@ async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | N
     # Wait for Simplify
     await page.wait_for_timeout(5000)
 
-    return await _click_submit_flow(page)
+    return await _click_submit_flow(page, original_url=url)
 
 
 async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1278,7 +1278,7 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any
     # Wait for Simplify
     await page.wait_for_timeout(5000)
 
-    return await _click_submit_flow(page)
+    return await _click_submit_flow(page, original_url=url)
 
 
 async def _handle_generic(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1312,7 +1312,7 @@ async def _handle_generic(page, ctx, job: dict[str, Any], acct: dict[str, Any] |
     # Wait for Simplify
     await page.wait_for_timeout(5000)
 
-    return await _click_submit_flow(page)
+    return await _click_submit_flow(page, original_url=url)
 
 
 async def _handle_icims(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1325,7 +1325,7 @@ async def _handle_smartrecruiters(page, ctx, job: dict[str, Any], acct: dict[str
     return await _handle_generic(page, ctx, job)
 
 
-async def _click_submit_flow(page) -> dict[str, Any]:
+async def _click_submit_flow(page, original_url: str | None = None) -> dict[str, Any]:
     """Try to click Submit or equivalent, check confirmation."""
     # Try Submit buttons
     for name in ["Submit Application", "Submit your application", "Submit", "Send Application"]:
@@ -1342,13 +1342,23 @@ async def _click_submit_flow(page) -> dict[str, Any]:
     # Check for confirmation
     try:
         body = await page.inner_text("body")
+        current_url = page.url
     except Exception:
         body = ""
+        current_url = ""
+
     for word in ["thank you", "submitted", "Your application", "application has been submitted"]:
         if word in body.lower():
             print(f"  ✅ SUBMITTED! (confirmation text found on page)")
             return _success_result(confirmation="page_text")
 
+    # Before returning pending, check if we actually moved to a form page
+    # Generic ATS: clicking "Apply Now" often opens external login — no form was filled
+    if original_url and current_url == original_url:
+        # URL unchanged — button didn't lead to an actual form
+        print(f"  ❌ No form loaded — 'Apply' button likely external/dead link")
+        return _skip_result("DEAD_LINK: Apply button leads to external site/no form loaded")
+    
     print(f"  → Submit clicked — confirmation not detected on page")
     return _success_result(method="simplify", status="pending", confirmation=None)
 
