@@ -1698,7 +1698,7 @@ class ApplyRunner:
             raw_result = _error_result("exception", str(exc))
 
         # Augment with job info
-        result = {**raw_result, "company": company, "role": role}
+        result = {**raw_result, "company": company, "role": role, "url": url}
         if raw_result["result"] == "success" and not result.get("resume_used"):
             result["resume_used"] = "resume.pdf"
 
