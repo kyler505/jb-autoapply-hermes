@@ -135,7 +135,7 @@ async def verify_submission(page, url: str) -> bool:
 
 
 def revert_vault(path: str) -> None:
-    """Change a vault note from 'applied' back to 'to-apply'."""
+    """Change a vault note from 'applied' (or 'pending') back to 'to-apply'."""
     with open(path) as fh:
         content = fh.read()
 
@@ -150,14 +150,38 @@ def revert_vault(path: str) -> None:
                 continue
             else:
                 break
-        if in_fm and line.startswith("status:") and "applied" in line:
-            lines[i] = line.replace("applied", "to-apply")
+        if in_fm and line.startswith("status:") and ("applied" in line or "pending" in line):
+            lines[i] = line.replace(line.split(":")[1].strip(), "to-apply", 1)
             modified = True
         if in_fm and line.startswith("applied_date:"):
             lines[i] = "applied_date: null"
             modified = True
         if in_fm and line.startswith("confirmation:"):
             lines[i] = "confirmation: null"
+            modified = True
+
+    if modified:
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+
+
+def confirm_vault(path: str) -> None:
+    """Upgrade a vault note from 'pending' to 'applied'."""
+    with open(path) as fh:
+        content = fh.read()
+
+    lines = content.split("\n")
+    in_fm = False
+    modified = False
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            if not in_fm:
+                in_fm = True
+                continue
+            else:
+                break
+        if in_fm and line.startswith("status:") and "pending" in line:
+            lines[i] = line.replace("pending", "applied", 1)
             modified = True
 
     if modified:
@@ -234,6 +258,8 @@ async def main():
                 if confirmed:
                     print("✅ CONFIRMED")
                     confirmed_count += 1
+                    if job["status"] == "pending":
+                        confirm_vault(job["path"])
                 else:
                     print(f"❌ NOT CONFIRMED → reverting")
                     revert_vault(job["path"])
