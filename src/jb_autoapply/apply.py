@@ -1575,6 +1575,13 @@ class ApplyRunner:
             self._dry_run_report(queue)
             return 0
 
+        # Pre-flight: clean up existing pending results before processing new ones
+        if not self.dry_run:
+            pending_cleanup = self._run_pending_cleanup(queue)
+            if pending_cleanup:
+                self.results.extend(pending_cleanup)
+                self._print_pending_cleanup_summary(pending_cleanup)
+
         # Ensure extensions are ready
         nopecha_ready = _nopecha.is_ready()
         simplify_ready = _simplify.is_ready()
@@ -1813,6 +1820,54 @@ class ApplyRunner:
         confirmed_count = sum(1 for v in verified if v["confirmed"])
         print(f"\n  Verification: {confirmed_count}/{len(verified)} confirmed")
         return verified
+
+    def _run_pending_cleanup(self, queue: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Pre-flight: scan vault for existing pending jobs and check email for confirmations.
+        Returns cleanup results to include in summary.
+        """
+        from glob import glob
+        from pathlib import Path
+        results = []
+        vdir = Path.home() / "Obsidian" / "jb" / "Jobs"
+        today = datetime.now().strftime("%Y-%m-%d")
+        for fpath in sorted(glob(str(vdir / "*.md"))):
+            with open(fpath) as fh:
+                lines = fh.readlines()
+            if not lines or lines[0].strip() != "---":
+                continue
+            fm = {}
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    fm[k.strip()] = v.strip()
+            status = fm.get("status", "").strip()
+            applied_date = fm.get("applied_date", "").strip()
+            if status != "pending" or applied_date != today:
+                continue
+            note_path = Path(fpath)
+            mtime = datetime.fromtimestamp(note_path.stat().st_mtime, tz=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+            if age_hours > 2:
+                # Revert
+                from .vault import read_note, set_fm_field, write_note
+                _, fm_text, body_text = read_note(note_path)
+                fm_text = set_fm_field(fm_text, "status", "to-apply")
+                fm_text = set_fm_field(fm_text, "applied_date", None)
+                fm_text = set_fm_field(fm_text, "apply_result", "timeout")
+                write_note(note_path, fm_text, body_text)
+                results.append({
+                    "company": fm.get("company", "?"),
+                    "role": fm.get("role", "?"),
+                    "action": "reverted",
+                })
+                print(f"  🧹 Reverted stale pending: {fm.get('company', '?')} — {fm.get('role', '?')}")
+        return results
+
+    def _print_pending_cleanup_summary(self, results: list[dict[str, Any]]) -> None:
+        if results:
+            print(f"  🧹 Pre-flight: {len(results)} stale pending jobs reverted to to-apply")
 
     def _print_summary(self) -> None:
         print(f"\n{'=' * 60}")
