@@ -12,8 +12,11 @@ def gmail_get(path, account='work'):
     d = json.load(open(tok_file))
     tok = d.get('token', d.get('access_token', ''))
     url = f'https://gmail.googleapis.com/gmail/v1/users/me/{path}'
-    res = subprocess.check_output(['curl', '-s', '-H', f'Authorization: Bearer {tok}', url])
-    return json.loads(res)
+    res = subprocess.check_output(['curl', '-s', '-w', '\n%{http_code}', '-H', f'Authorization: Bearer {tok}', url])
+    body, code = res.decode().rsplit('\n', 1)
+    if code == '401':
+        raise PermissionError('Token expired')
+    return json.loads(body)
 
 def hr(s):
     return f'\n{"─" * 60}\n{s}\n{"─" * 60}'
