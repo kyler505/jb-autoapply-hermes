@@ -1406,7 +1406,7 @@ def _skip_result(reason: str) -> dict[str, Any]:
     return {
         "method": "none",
         "result": "skipped",
-        "status": "to-apply",
+        "status": "skipped",
         "needs_review": False,
         "applied_date": None,
         "confirmation": None,
