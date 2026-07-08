@@ -1395,6 +1395,18 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any
     # Wait for form to render
     await page.wait_for_timeout(3000)
 
+    # Check for CAPTCHA early — skip if we can't solve it
+    try:
+        has_captcha = await page.evaluate('''() => {
+            let frames = document.querySelectorAll('iframe[src*=\"recaptcha\"]');
+            let nelems = document.querySelectorAll('[class*=\"g-recaptcha\"], [class*=\"recaptcha\"]');
+            return frames.length > 0 || nelems.length > 0;
+        }''')
+        if has_captcha:
+            print(f"  ⚠ reCAPTCHA detected — will try NopeCHA solve")
+    except Exception:
+        pass
+
     # Helper: fill a field by id
     async def _fill_field(selector: str, value: str, field_name: str = "") -> bool:
         if not value:
@@ -1595,9 +1607,12 @@ async def _click_submit_flow(page, original_url: str | None = None) -> dict[str,
         pass
 
     # Check for error messages (CAPTCHA errors, form validation)
-    if "error" in body.lower() or "grecaptcha-error" in body.lower():
-        print(f"  ❌ Form has errors (likely CAPTCHA or validation)")
-        return _error_result("form_errors", "CAPTCHA or form validation errors detected")
+    if "grecaptcha-error" in body.lower() or "recaptcha" in body.lower():
+        print(f"  ❌ Blocked by reCAPTCHA — cannot submit (NopeCHA not solving)")
+        return _skip_result("CAPTCHA block")
+    if "error" in body.lower():
+        print(f"  ⚠ Page shows possible errors")
+        # Don't skip — might be benign
 
     # Before returning pending, check if we actually moved to a form page
     if original_url and current_url == original_url:
@@ -1835,38 +1850,35 @@ class ApplyRunner:
         # (Playwright's built-in Chromium disables extensions, so we
         # launch Chrome for Testing manually with --load-extension.)
         chrome_proc = _ensure_chrome_with_extensions()
-        if chrome_proc is None and not os.path.exists(
-            os.path.join(PROFILE, "Default", "Extensions")
-        ):
-            # Maybe Chrome was already running — check CDP
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.settimeout(2)
-                s.connect(("127.0.0.1", _CDP_PORT))
-                s.close()
-                print(f"  → Connected to existing Chrome on port {_CDP_PORT}")
-            except (ConnectionRefusedError, OSError):
-                print(f"  ⚠ Could not launch Chrome with extensions — falling back to Playwright's Chromium")
-                # Fall through to use Playwright's native browser (no Simplify)
-                chrome_proc = None
+
+        async def _get_cdp_browser(p):
+            """Try CDP first, fall back to Playwright Chromium."""
+            # Try CDP
+            for retry in range(3):
+                try:
+                    browser = await p.chromium.connect_over_cdp(_CDP_URL, timeout=5000)
+                    ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+                    print(f"  → Connected via CDP (extensions enabled)")
+                    return browser, ctx, True
+                except Exception:
+                    if retry == 0 and chrome_proc is not None:
+                        # Maybe Chrome is still starting
+                        import asyncio
+                        await asyncio.sleep(3)
+                    else:
+                        break
+
+            # Fallback: Playwright's native Chromium (no extensions)
+            ctx = await p.chromium.launch_persistent_context(
+                user_data_dir=PROFILE,
+                headless=False,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            print(f"  → Using Playwright Chromium (no extensions — CAPTCHAs won't be solved)")
+            return None, ctx, False
 
         async with async_playwright() as p:
-            if chrome_proc is not None or os.path.exists(
-                os.path.join(PROFILE, "Default")
-            ):
-                # Connect via CDP — extensions WILL be loaded
-                browser = await p.chromium.connect_over_cdp(_CDP_URL)
-                ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-                print(f"  → Connected via CDP (extensions enabled)")
-            else:
-                # Fallback: use Playwright's native browser (no Simplify)
-                ctx = await p.chromium.launch_persistent_context(
-                    user_data_dir=PROFILE,
-                    headless=False,
-                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                )
-                print(f"  → Using Playwright Chromium (no extensions — Simplify unavailable)")
+            browser, ctx, has_extensions = await _get_cdp_browser(p)
 
             try:
                 for idx, job in enumerate(queue):
@@ -1896,9 +1908,11 @@ class ApplyRunner:
                 self.verified = verified
 
             finally:
-                await ctx.close()
-                # Don't kill Chrome — it persists for the next run
-                # chrome_proc will be cleaned up by the OS or next launch
+                # Graceful cleanup — don't crash if Chrome already died
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass  # Chrome already crashed
 
         self._print_summary()
         return 0
