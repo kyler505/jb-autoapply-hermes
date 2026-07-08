@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -18,9 +17,8 @@ from typing import Any
 from playwright.async_api import async_playwright
 
 from . import accounts as _accounts
+from . import capsolver as _capsolver
 from . import config
-from . import nopecha as _nopecha
-from . import simplify as _simplify
 from .adapters import detect_site
 from .selector import build_queue
 from .vault import read_note, set_fm_field, write_note
@@ -40,101 +38,24 @@ ATS_RATE_LIMITS: dict[str, int] = {
 }
 
 # Chromium profile directory (ephemeral per run)
-PROFILE = "/tmp/autoapply-run"
 RESUME_PATH = Path.home() / ".hermes" / ".playwright-mcp" / "resume.pdf"
-
-# CDP-based Chrome launcher (needed because Playwright's Chromium blocks extensions)
-_CHROME_BIN = (
-    Path.home() / ".cache" / "ms-playwright" /
-    "chromium-1228" / "chrome-linux64" / "chrome"
-)
-_CDP_PORT = 9615  # arbitrary unused port
-_CDP_URL = f"http://localhost:{_CDP_PORT}"
-
-
-def _ensure_chrome_with_extensions() -> subprocess.Popen | None:
-    """Launch (or reuse) Chrome with Simplify + NopeCHA via CDP.
-
-    Returns the Popen handle, or None if already running.
-    """
-    import socket
-
-    # Check if Chrome is already running on our CDP port
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect(("127.0.0.1", _CDP_PORT))
-        sock.close()
-        return None  # already running
-    except ConnectionRefusedError:
-        pass
-    finally:
-        sock.close()
-
-    if not _CHROME_BIN.exists():
-        print(f"  ⚠ Chrome for Testing not found at {_CHROME_BIN}")
-        print(f"  ⚠ Install with: playwright install chromium")
-        return None
-
-    # Build extension paths — only load NopeCHA (Simplify requires user auth)
-    nopecha_dir = _nopecha.EXTENSION_DIR
-    ext_paths = [str(nopecha_dir)]
-
-    args = [
-        str(_CHROME_BIN),
-        f"--user-data-dir={PROFILE}",
-        f"--load-extension={','.join(ext_paths)}",
-        f"--remote-debugging-port={_CDP_PORT}",
-        "--no-sandbox",
-        "--enable-extensions",
-        "--no-first-run",
-        "--new-window", "about:blank",
-    ]
-
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    # Wait for CDP to become available
-    for _ in range(15):
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.settimeout(1)
-            s.connect(("127.0.0.1", _CDP_PORT))
-            s.close()
-            return proc
-        except ConnectionRefusedError:
-            s.close()
-            import time
-            time.sleep(1)
-
-    print("  ⚠ Chrome launched but CDP not available after 15s")
-    return proc
 
 
 def _kill_chrome() -> None:
-    """Kill Chrome instances running on the CDP port and clean the profile."""
-    import signal
+    """Kill any stale Chromium/Playwright browser processes."""
+    import subprocess
     try:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
-        s.connect(("127.0.0.1", _CDP_PORT))
-        s.close()
-        # Chrome is running — kill by PID file or port
-        import subprocess
         subprocess.run(
-            ["fuser", "-k", f"{_CDP_PORT}/tcp"],
+            ["pkill", "-f", "playwright.*chromium"],
             capture_output=True, timeout=5,
         )
-        print(f"  Killed Chrome on port {_CDP_PORT}")
-    except (ConnectionRefusedError, OSError):
-        print("  Chrome not running on CDP port")
-    # Clean profile
-    if os.path.exists(PROFILE):
-        shutil.rmtree(PROFILE)
-        print(f"  Cleaned profile {PROFILE}")
+        # Also clean the Playwright profile
+        profile = "/tmp/autoapply-playwright"
+        if os.path.exists(profile):
+            shutil.rmtree(profile, ignore_errors=True)
+            print(f"  Cleaned profile {profile}")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1330,6 +1251,24 @@ async def _fill_questions(page, company: str = "", role: str = "") -> int:
     return await _fill_longform_questions(page, job)
 
 
+async def _find_captcha_site_key(page) -> str | None:
+    """Extract reCAPTCHA site key from the current page."""
+    return await _capsolver.find_site_key(page)
+
+
+async def _solve_recaptcha(page, site_key: str, page_url: str) -> str | None:
+    """Solve reCAPTCHA via Capsolver API and inject token."""
+    token = await _capsolver.solve_recaptcha(page, site_key, page_url)
+    if token:
+        await _capsolver.inject_token(page, token)
+    return token
+
+
+async def _inject_recaptcha_token(page, token: str) -> bool:
+    """Inject a solved reCAPTCHA token into the page."""
+    return await _capsolver.inject_token(page, token)
+
+
 async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ashby flow: upload resume, fill fields, submit."""
     url: str = job["url"]
@@ -1493,32 +1432,30 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any
     # Answer text questions
     await _fill_questions(page, company=job.get("company", ""), role=job.get("role", ""))
 
-    # Wait for NopeCHA to solve any CAPTCHA
-    print(f"  ⏳ Waiting for CAPTCHA solving...")
-    for _ in range(30):  # up to 30 seconds
-        await page.wait_for_timeout(1000)
-        # Check if reCAPTCHA is still visible or has been solved
-        try:
-            solved = await page.evaluate('''() => {
-                let frames = document.querySelectorAll('iframe[src*=\"recaptcha\"]');
-                for (let f of frames) {
-                    try {
-                        let src = f.src || '';
-                        // If still showing the challenge, not solved
-                        if (src.includes('anchor')) return false;
-                    } catch(e) {}
-                }
-                // Check for NopeCHA badge — if it disappears, CAPTCHA is solved
-                let nopecha = document.querySelector('[class*=\"nopecha\"], [id*=\"nopecha\"]');
-                return !nopecha || nopecha.style.display === 'none';
-            }''')
-            if solved:
-                print(f"    ✓ CAPTCHA solved")
-                break
-        except Exception:
-            pass
-    else:
-        print(f"    ⚠ CAPTCHA may not be solved — proceeding anyway")
+    # Solve reCAPTCHA via Capsolver API (NopeCHA extension doesn't work in automated Chrome)
+    try:
+        has_captcha = await page.evaluate("""() => {
+            let frames = document.querySelectorAll('iframe[src*="recaptcha"]');
+            let nelems = document.querySelectorAll('[class*="g-recaptcha"], [data-sitekey]');
+            return frames.length > 0 || nelems.length > 0;
+        }""")
+        if has_captcha:
+            site_key = await _find_captcha_site_key(page)
+            if site_key:
+                print(f"  🧠 reCAPTCHA detected — solving via Capsolver...")
+                token = await _solve_recaptcha(page, site_key, url)
+                if token:
+                    await _inject_recaptcha_token(page, token)
+                else:
+                    print(f"  ⚠ CAPTCHA solve failed — skipping (no NopeCHA available)")
+                    return _skip_result("CAPTCHA block")
+            else:
+                print(f"  ⚠ Could not find reCAPTCHA site key — skipping")
+                return _skip_result("CAPTCHA block")
+        else:
+            print(f"  ✓ No CAPTCHA detected")
+    except Exception as e:
+        print(f"  ⚠ CAPTCHA detection error: {e}")
 
     # Click Submit
     return await _click_submit_flow(page, original_url=url)
@@ -1842,43 +1779,18 @@ class ApplyRunner:
                 self.results.extend(pending_cleanup)
                 self._print_pending_cleanup_summary(pending_cleanup)
 
-        # Ensure extensions are ready
-        nopecha_ready = _nopecha.is_ready()
-        print(f"NopeCHA: {'✓' if nopecha_ready else '✗'} (CAPTCHA solver)")
+        # Check CAPTCHA solving setup
+        capsolver_ready = _capsolver.is_configured()
+        print(f"Capsolver: {'✓' if capsolver_ready else '✗'} (reCAPTCHA solving)")
 
-        # Launch Google Chrome with extension support via CDP
-        # (Playwright's built-in Chromium disables extensions, so we
-        # launch Chrome for Testing manually with --load-extension.)
-        chrome_proc = _ensure_chrome_with_extensions()
-
-        async def _get_cdp_browser(p):
-            """Try CDP first, fall back to Playwright Chromium."""
-            # Try CDP
-            for retry in range(3):
-                try:
-                    browser = await p.chromium.connect_over_cdp(_CDP_URL, timeout=5000)
-                    ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-                    print(f"  → Connected via CDP (extensions enabled)")
-                    return browser, ctx, True
-                except Exception:
-                    if retry == 0 and chrome_proc is not None:
-                        # Maybe Chrome is still starting
-                        import asyncio
-                        await asyncio.sleep(3)
-                    else:
-                        break
-
-            # Fallback: Playwright's native Chromium (no extensions)
+        # Use Playwright's native Chromium (simpler, no CDP/extension headaches)
+        # CAPTCHAs are solved via Capsolver API instead of browser extensions
+        async with async_playwright() as p:
             ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE,
+                user_data_dir="/tmp/autoapply-playwright",
                 headless=False,
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
-            print(f"  → Using Playwright Chromium (no extensions — CAPTCHAs won't be solved)")
-            return None, ctx, False
-
-        async with async_playwright() as p:
-            browser, ctx, has_extensions = await _get_cdp_browser(p)
 
             try:
                 for idx, job in enumerate(queue):
@@ -1908,11 +1820,10 @@ class ApplyRunner:
                 self.verified = verified
 
             finally:
-                # Graceful cleanup — don't crash if Chrome already died
                 try:
                     await ctx.close()
                 except Exception:
-                    pass  # Chrome already crashed
+                    pass
 
         self._print_summary()
         return 0
