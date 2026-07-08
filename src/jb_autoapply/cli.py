@@ -202,8 +202,8 @@ def _accounts_verify() -> int:
     return 0 if all(r["valid"] for r in results) else 1
 
 
-def _apply(limit: int | None = None, dry_run: bool = False, evaluate: int = 0, review: bool = False) -> int:
-    return apply_queue(limit=limit, dry_run=dry_run, evaluate=evaluate, review=review)
+def _apply(limit: int | None = None, dry_run: bool = False, evaluate: int = 0, review: bool = False, cleanup: bool = False) -> int:
+    return apply_queue(limit=limit, dry_run=dry_run, evaluate=evaluate, review=review, cleanup=cleanup)
 
 
 def _linkedin_search(
@@ -275,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                          help='Score top N jobs with 5-dimension evaluation framework before processing')
     p_apply.add_argument('--review', action='store_true', default=False,
                          help='Run drafter-reviewer on competitive roles before applying')
+    p_apply.add_argument('--cleanup', action='store_true', default=False,
+                         help='Kill background Chrome and clean profile')
 
     p_li = sub.add_parser('linkedin-search', help='Search LinkedIn jobs via the public guest API')
     p_li.add_argument('--keyword', required=True, help='Job search keyword (e.g. "software engineer intern")')
@@ -328,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'accounts-verify':
         return _accounts_verify()
     if args.cmd == 'apply':
-        return _apply(limit=args.limit, dry_run=args.dry_run, evaluate=args.evaluate, review=args.review)
+        return _apply(limit=args.limit, dry_run=args.dry_run, evaluate=args.evaluate, review=args.review, cleanup=args.cleanup)
     if args.cmd == 'linkedin-search':
         return _linkedin_search(
             keyword=args.keyword,

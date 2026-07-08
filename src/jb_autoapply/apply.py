@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -41,6 +42,102 @@ ATS_RATE_LIMITS: dict[str, int] = {
 # Chromium profile directory (ephemeral per run)
 PROFILE = "/tmp/autoapply-run"
 RESUME_PATH = Path.home() / ".hermes" / ".playwright-mcp" / "resume.pdf"
+
+# CDP-based Chrome launcher (needed because Playwright's Chromium blocks extensions)
+_CHROME_BIN = (
+    Path.home() / ".cache" / "ms-playwright" /
+    "chromium-1228" / "chrome-linux64" / "chrome"
+)
+_CDP_PORT = 9615  # arbitrary unused port
+_CDP_URL = f"http://localhost:{_CDP_PORT}"
+
+
+def _ensure_chrome_with_extensions() -> subprocess.Popen | None:
+    """Launch (or reuse) Chrome with Simplify + NopeCHA via CDP.
+
+    Returns the Popen handle, or None if already running.
+    """
+    import socket
+
+    # Check if Chrome is already running on our CDP port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect(("127.0.0.1", _CDP_PORT))
+        sock.close()
+        return None  # already running
+    except ConnectionRefusedError:
+        pass
+    finally:
+        sock.close()
+
+    if not _CHROME_BIN.exists():
+        print(f"  ⚠ Chrome for Testing not found at {_CHROME_BIN}")
+        print(f"  ⚠ Install with: playwright install chromium")
+        return None
+
+    # Build extension paths
+    simplify_dir = _simplify.EXTENSION_DIR
+    nopecha_dir = _nopecha.EXTENSION_DIR
+    ext_paths = [str(simplify_dir)]
+    if nopecha_dir.exists():
+        ext_paths.append(str(nopecha_dir))
+
+    args = [
+        str(_CHROME_BIN),
+        f"--user-data-dir={PROFILE}",
+        f"--load-extension={','.join(ext_paths)}",
+        f"--remote-debugging-port={_CDP_PORT}",
+        "--no-sandbox",
+        "--enable-extensions",
+        "--no-first-run",
+        "--new-window", "about:blank",
+    ]
+
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # Wait for CDP to become available
+    for _ in range(15):
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.settimeout(1)
+            s.connect(("127.0.0.1", _CDP_PORT))
+            s.close()
+            return proc
+        except ConnectionRefusedError:
+            s.close()
+            import time
+            time.sleep(1)
+
+    print("  ⚠ Chrome launched but CDP not available after 15s")
+    return proc
+
+
+def _kill_chrome() -> None:
+    """Kill Chrome instances running on the CDP port and clean the profile."""
+    import signal
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", _CDP_PORT))
+        s.close()
+        # Chrome is running — kill by PID file or port
+        import subprocess
+        subprocess.run(
+            ["fuser", "-k", f"{_CDP_PORT}/tcp"],
+            capture_output=True, timeout=5,
+        )
+        print(f"  Killed Chrome on port {_CDP_PORT}")
+    except (ConnectionRefusedError, OSError):
+        print("  Chrome not running on CDP port")
+    # Clean profile
+    if os.path.exists(PROFILE):
+        shutil.rmtree(PROFILE)
+        print(f"  Cleaned profile {PROFILE}")
 
 
 # ---------------------------------------------------------------------------
@@ -1587,26 +1684,42 @@ class ApplyRunner:
         simplify_ready = _simplify.is_ready()
         print(f"Extensions: NopeCHA={'✓' if nopecha_ready else '✗'} Simplify={'✓' if simplify_ready else '✗'}")
 
-        # Build Playwright args with both extensions
-        ext_args: list[str] = []
-        if nopecha_ready and simplify_ready:
-            ext_args = _simplify.playwright_args_with_nopecha()
-        elif nopecha_ready:
-            ext_args = _nopecha.playwright_args()
-        elif simplify_ready:
-            ext_args = _simplify.playwright_args()
-        ext_args.extend(["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-
-        # Clean profile from previous runs
-        if os.path.exists(PROFILE):
-            shutil.rmtree(PROFILE)
+        # Launch Google Chrome with extension support via CDP
+        # (Playwright's built-in Chromium disables extensions, so we
+        # launch Chrome for Testing manually with --load-extension.)
+        chrome_proc = _ensure_chrome_with_extensions()
+        if chrome_proc is None and not os.path.exists(
+            os.path.join(PROFILE, "Default", "Extensions")
+        ):
+            # Maybe Chrome was already running — check CDP
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.settimeout(2)
+                s.connect(("127.0.0.1", _CDP_PORT))
+                s.close()
+                print(f"  → Connected to existing Chrome on port {_CDP_PORT}")
+            except (ConnectionRefusedError, OSError):
+                print(f"  ⚠ Could not launch Chrome with extensions — falling back to Playwright's Chromium")
+                # Fall through to use Playwright's native browser (no Simplify)
+                chrome_proc = None
 
         async with async_playwright() as p:
-            ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE,
-                headless=False,
-                args=ext_args,
-            )
+            if chrome_proc is not None or os.path.exists(
+                os.path.join(PROFILE, "Default")
+            ):
+                # Connect via CDP — extensions WILL be loaded
+                browser = await p.chromium.connect_over_cdp(_CDP_URL)
+                ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+                print(f"  → Connected via CDP (extensions enabled)")
+            else:
+                # Fallback: use Playwright's native browser (no Simplify)
+                ctx = await p.chromium.launch_persistent_context(
+                    user_data_dir=PROFILE,
+                    headless=False,
+                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                )
+                print(f"  → Using Playwright Chromium (no extensions — Simplify unavailable)")
 
             try:
                 for idx, job in enumerate(queue):
@@ -1623,14 +1736,8 @@ class ApplyRunner:
                         try:
                             page = await ctx.new_page()
                         except Exception:
-                            print(f"  Browser context dead — re-launching...")
-                            await ctx.close()
-                            ctx = await p.chromium.launch_persistent_context(
-                                user_data_dir=PROFILE,
-                                headless=False,
-                                args=ext_args,
-                            )
-                            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                            print(f"  Browser context dead — cannot continue")
+                            break
 
                     result = await self._process_one(page, job)
                     self.results.append(result)
@@ -1643,6 +1750,8 @@ class ApplyRunner:
 
             finally:
                 await ctx.close()
+                # Don't kill Chrome — it persists for the next run
+                # chrome_proc will be cleaned up by the OS or next launch
 
         self._print_summary()
         return 0
@@ -1915,6 +2024,7 @@ def apply_queue(
     limit: int | None = None,
     evaluate: int = 0,
     review: bool = False,
+    cleanup: bool = False,
 ) -> int:
     """Run the apply pipeline (synchronous entry point called from cli.py).
 
@@ -1924,7 +2034,11 @@ def apply_queue(
         evaluate: If > 0, score the top N queue jobs with the 5-dimension
             evaluation framework before processing (subagents per job).
         review: If True, run the drafter-reviewer pass on competitive roles.
+        cleanup: If True, kill the background Chrome and clean profile.
     """
+    if cleanup:
+        _kill_chrome()
+        return 0
     runner = ApplyRunner(dry_run=dry_run, limit=limit, review=review)
     return asyncio.run(runner.run(evaluate=evaluate))
 
