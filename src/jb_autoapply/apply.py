@@ -1432,7 +1432,7 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any
     # Answer text questions
     await _fill_questions(page, company=job.get("company", ""), role=job.get("role", ""))
 
-    # Solve reCAPTCHA via Capsolver API (NopeCHA extension doesn't work in automated Chrome)
+    # Solve reCAPTCHA via NopeCHA API (free tier: 100 solves/day by IP)
     try:
         has_captcha = await page.evaluate("""() => {
             let frames = document.querySelectorAll('iframe[src*="recaptcha"]');
@@ -1780,8 +1780,8 @@ class ApplyRunner:
                 self._print_pending_cleanup_summary(pending_cleanup)
 
         # Check CAPTCHA solving setup
-        capsolver_ready = _capsolver.is_configured()
-        print(f"Capsolver: {'✓' if capsolver_ready else '✗'} (reCAPTCHA solving)")
+        capsolver_ok = _capsolver.is_configured()
+        print(f"Capsolver: {'✓ key set' if capsolver_ok else '✗ CAPSOLVER_KEY not set — CAPTCHAs will be skipped'}")
 
         # Use Playwright's native Chromium (simpler, no CDP/extension headaches)
         # CAPTCHAs are solved via Capsolver API instead of browser extensions
