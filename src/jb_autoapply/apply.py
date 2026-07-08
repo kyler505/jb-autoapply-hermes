@@ -75,12 +75,9 @@ def _ensure_chrome_with_extensions() -> subprocess.Popen | None:
         print(f"  ⚠ Install with: playwright install chromium")
         return None
 
-    # Build extension paths
-    simplify_dir = _simplify.EXTENSION_DIR
+    # Build extension paths — only load NopeCHA (Simplify requires user auth)
     nopecha_dir = _nopecha.EXTENSION_DIR
-    ext_paths = [str(simplify_dir)]
-    if nopecha_dir.exists():
-        ext_paths.append(str(nopecha_dir))
+    ext_paths = [str(nopecha_dir)]
 
     args = [
         str(_CHROME_BIN),
@@ -1327,6 +1324,12 @@ No em-dashes. Forward-looking (what I can do for {company})."""
     return filled
 
 
+async def _fill_questions(page, company: str = "", role: str = "") -> int:
+    """Fill textarea/long-answer questions using QA store + profile data."""
+    job = {"company": company, "role": role}
+    return await _fill_longform_questions(page, job)
+
+
 async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ashby flow: upload resume, fill fields, submit."""
     url: str = job["url"]
@@ -1354,13 +1357,88 @@ async def _handle_ashby(page, ctx, job: dict[str, Any], acct: dict[str, Any] | N
 
 
 async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Greenhouse flow: fill fields, attach resume, submit."""
+    """Greenhouse flow: native Playwright form filling.
+    
+    Uses NopeCHA (loaded via CDP Chrome) to solve reCAPTCHA.
+    """
+    from jb_autoapply.profile_data import load_profile
+
     url: str = job["url"]
 
     await page.goto(url, timeout=30000, wait_until="domcontentloaded")
     await page.wait_for_timeout(3000)
 
+    # Accept cookies if present
     await _click_text(page, "Accept")
+    await page.wait_for_timeout(1000)
+
+    # Load candidate profile
+    profile = load_profile()
+    first_name = profile.get("first_name", "Kyler")
+    last_name = profile.get("last_name", "Cao")
+    email = profile.get("email", "kcao@tamu.edu")
+    phone = profile.get("phone", "")
+    location = profile.get("location", "College Station, TX")
+    linkedin = profile.get("linkedin", "https://linkedin.com/in/kylercao")
+    website = profile.get("website", "https://kylercao.com")
+    github = profile.get("github", "")
+
+    # Click Apply button to open form
+    for apply_text in ["Apply for this job", "Apply Now", "Apply", "Easy Apply"]:
+        if await _click_text(page, apply_text):
+            await page.wait_for_timeout(3000)
+            break
+    else:
+        print(f"  ✗ No Apply button found")
+        return _skip_result("DEAD_LINK: No Apply button found")
+
+    # Wait for form to render
+    await page.wait_for_timeout(3000)
+
+    # Helper: fill a field by id
+    async def _fill_field(selector: str, value: str, field_name: str = "") -> bool:
+        if not value:
+            return False
+        try:
+            locator = page.locator(selector).first
+            if await locator.is_visible(timeout=2000):
+                await locator.click()
+                await locator.fill(value)
+                print(f"    ✓ {field_name or selector}: filled")
+                return True
+        except Exception:
+            pass
+        return False
+
+    # Helper: fill by label text
+    async def _fill_by_label(label: str, value: str) -> bool:
+        if not value:
+            return False
+        try:
+            lbl = page.locator(f"label:has-text(\"{label}\")").first
+            if await lbl.is_visible(timeout=1000):
+                for_id = await lbl.get_attribute("for")
+                if for_id:
+                    inp = page.locator(f"#{for_id}")
+                    if await inp.is_visible(timeout=500):
+                        await inp.click()
+                        await inp.fill(value)
+                        return True
+                inp = lbl.locator("xpath=following::input[1]").first
+                if await inp.is_visible(timeout=500):
+                    await inp.click()
+                    await inp.fill(value)
+                    return True
+        except Exception:
+            pass
+        return False
+
+    # Fill basic fields
+    await _fill_field("#first_name", first_name, "First name")
+    await _fill_field("#last_name", last_name, "Last name")
+    await _fill_field("#email", email, "Email")
+    await _fill_field("#phone", phone, "Phone")
+    await _fill_field("#candidate-location", location, "Location")
 
     # Upload resume
     if RESUME_PATH.exists():
@@ -1368,13 +1446,69 @@ async def _handle_greenhouse(page, ctx, job: dict[str, Any], acct: dict[str, Any
             file_input = page.locator('input[type="file"]').first
             if await file_input.is_visible(timeout=2000):
                 await file_input.set_input_files(str(RESUME_PATH))
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2000)
+                print(f"    ✓ Resume uploaded: {RESUME_PATH.name}")
+        except Exception:
+            print(f"    ⚠ Could not upload resume")
+
+    # LinkedIn, website, GitHub
+    await _fill_by_label("LinkedIn", linkedin)
+    await _fill_by_label("Website", website)
+    await _fill_by_label("Portfolio", website)
+    await _fill_by_label("GitHub", github)
+    await _fill_by_label("GitHub URL", github)
+
+    # How did you hear
+    await _fill_by_label("How did you hear", "LinkedIn")
+    await _fill_by_label("Referral", "LinkedIn")
+    await _fill_by_label("Source", "LinkedIn")
+
+    # Sponsorship
+    try:
+        sponsorship = page.locator('input[name*="sponsor"], input[id*="sponsor"]').first
+        if await sponsorship.is_visible(timeout=1000):
+            no_radio = page.locator(
+                'input[type="radio"][value*="no" i], '
+                'input[type="radio"][value*="false" i], '
+                'input[type="radio"][id*="sponsor"]:nth-child(2)'
+            ).first
+            if await no_radio.is_visible(timeout=500):
+                await no_radio.click(force=True)
+                print(f"    ✓ Sponsorship: No")
+    except Exception:
+        pass
+
+    # Answer text questions
+    await _fill_questions(page, company=job.get("company", ""), role=job.get("role", ""))
+
+    # Wait for NopeCHA to solve any CAPTCHA
+    print(f"  ⏳ Waiting for CAPTCHA solving...")
+    for _ in range(30):  # up to 30 seconds
+        await page.wait_for_timeout(1000)
+        # Check if reCAPTCHA is still visible or has been solved
+        try:
+            solved = await page.evaluate('''() => {
+                let frames = document.querySelectorAll('iframe[src*=\"recaptcha\"]');
+                for (let f of frames) {
+                    try {
+                        let src = f.src || '';
+                        // If still showing the challenge, not solved
+                        if (src.includes('anchor')) return false;
+                    } catch(e) {}
+                }
+                // Check for NopeCHA badge — if it disappears, CAPTCHA is solved
+                let nopecha = document.querySelector('[class*=\"nopecha\"], [id*=\"nopecha\"]');
+                return !nopecha || nopecha.style.display === 'none';
+            }''')
+            if solved:
+                print(f"    ✓ CAPTCHA solved")
+                break
         except Exception:
             pass
+    else:
+        print(f"    ⚠ CAPTCHA may not be solved — proceeding anyway")
 
-    # Wait for Simplify
-    await page.wait_for_timeout(5000)
-
+    # Click Submit
     return await _click_submit_flow(page, original_url=url)
 
 
@@ -1427,7 +1561,8 @@ async def _click_submit_flow(page, original_url: str | None = None) -> dict[str,
     # Try Submit buttons
     for name in ["Submit Application", "Submit your application", "Submit", "Send Application"]:
         if await _click_text(page, name):
-            await page.wait_for_timeout(4000)
+            print(f"  → Clicked '{name}', waiting for submission...")
+            await page.wait_for_timeout(8000)  # longer wait for CAPTCHA + submit
             break
 
     # If no Submit button, try "Apply" buttons
@@ -1444,20 +1579,33 @@ async def _click_submit_flow(page, original_url: str | None = None) -> dict[str,
         body = ""
         current_url = ""
 
+    # Check confirmation text
     for word in ["thank you", "submitted", "Your application", "application has been submitted"]:
         if word in body.lower():
             print(f"  ✅ SUBMITTED! (confirmation text found on page)")
             return _success_result(confirmation="page_text")
 
+    # Check for "Applied" button (Greenhouse shows this after successful apply)
+    try:
+        applied_btn = page.get_by_role("button", name="Applied", exact=False)
+        if await applied_btn.count() > 0:
+            print(f"  ✅ Already applied! (Applied button detected)")
+            return _success_result(confirmation="applied_button")
+    except Exception:
+        pass
+
+    # Check for error messages (CAPTCHA errors, form validation)
+    if "error" in body.lower() or "grecaptcha-error" in body.lower():
+        print(f"  ❌ Form has errors (likely CAPTCHA or validation)")
+        return _error_result("form_errors", "CAPTCHA or form validation errors detected")
+
     # Before returning pending, check if we actually moved to a form page
-    # Generic ATS: clicking "Apply Now" often opens external login — no form was filled
     if original_url and current_url == original_url:
-        # URL unchanged — button didn't lead to an actual form
         print(f"  ❌ No form loaded — 'Apply' button likely external/dead link")
         return _skip_result("DEAD_LINK: Apply button leads to external site/no form loaded")
-    
+
     print(f"  → Submit clicked — confirmation not detected on page")
-    return _success_result(method="simplify", status="pending", confirmation=None)
+    return _success_result(method="native", status="pending", confirmation=None)
 
 
 # ---------------------------------------------------------------------------
@@ -1681,8 +1829,7 @@ class ApplyRunner:
 
         # Ensure extensions are ready
         nopecha_ready = _nopecha.is_ready()
-        simplify_ready = _simplify.is_ready()
-        print(f"Extensions: NopeCHA={'✓' if nopecha_ready else '✗'} Simplify={'✓' if simplify_ready else '✗'}")
+        print(f"NopeCHA: {'✓' if nopecha_ready else '✗'} (CAPTCHA solver)")
 
         # Launch Google Chrome with extension support via CDP
         # (Playwright's built-in Chromium disables extensions, so we
